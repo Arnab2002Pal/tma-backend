@@ -50,4 +50,24 @@ export class WhatsappService {
             headers: { Authorization: `Bearer ${this.token}` },
         }));
     }
+
+    async getMediaUrl(mediaId: string): Promise<string> {
+        const url = `https://graph.facebook.com/v21.0/${mediaId}`;
+        const response = await firstValueFrom(
+            this.httpService.get(url, {
+                headers: { Authorization: `Bearer ${this.token}` },
+            }),
+        );
+        return response.data.url; // This is the temporary download link
+    }
+
+    async downloadMedia(url: string): Promise<Buffer> {
+        const response = await firstValueFrom(
+            this.httpService.get(url, {
+                headers: { Authorization: `Bearer ${this.token}` },
+                responseType: 'arraybuffer', // Crucial for binary data
+            }),
+        );
+        return Buffer.from(response.data);
+    }
 }

@@ -1,12 +1,14 @@
 import { Controller, Get, Post, Body, Query, HttpCode, HttpStatus } from '@nestjs/common';
 import { WhatsappService } from './whatsapp.service';
 import { ConfigService } from '@nestjs/config';
+import { AiService } from 'src/triage/ai.service';
 
 @Controller('whatsapp')
 export class WhatsappController {
     constructor(
         private readonly whatsappService: WhatsappService,
         private readonly config: ConfigService,
+        private readonly aiService: AiService
     ) { }
 
     // 1. Webhook Verification (GET)
@@ -44,9 +46,17 @@ export class WhatsappController {
         }
 
         if (messageType === 'audio') {
-            const audioId = message.audio.id;
-            console.log(`Received audio ID: ${audioId}`);
-            // TODO: Download from Meta -> OpenAI Whisper
+            const mediaUrl = await this.whatsappService.getMediaUrl(message.audio.id);
+            const audioBuffer = await this.whatsappService.downloadMedia(mediaUrl);
+
+            console.log(`Received audio from ${from}, media URL: ${mediaUrl}`);
+            console.log(`audioBuffer: ${audioBuffer.length} bytes`);
+            const transcript = await this.aiService.transcribe(audioBuffer, 'voice.ogg');
+
+            console.log("transcript:---:", transcript);
+            
+            // const result = await this.triageService.processInput(transcript, from);
+            // await this.whatsappService.sendTextMessage(from, result.message);
         }
 
         return { status: 'success' };
