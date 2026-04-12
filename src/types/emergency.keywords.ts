@@ -1,0 +1,20 @@
+// Direct Layer 4 — no AI needed, zero ambiguity
+export const BODY_STATE_KEYWORDS = [
+    'unconscious',
+    'not responding',
+    'not breathing',
+    'stopped breathing',
+    'collapsed',
+    'fainted',
+    'anaphylaxis',
+    'throat closing',
+    'seizure',
+    'febrile seizure',
+    'uncontrolled bleeding',
+    'major bleeding',
+    'heart attack',
+    'stroke',
+    'face drooping',
+    'arm weakness',
+    'slurred speech',
+];
