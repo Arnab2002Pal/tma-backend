@@ -4,6 +4,6 @@ import { AiService } from './ai.service';
 
 @Module({
   providers: [TriageService, AiService],
-  exports: [AiService]
+  exports: [TriageService, AiService]
 })
 export class TriageModule {}

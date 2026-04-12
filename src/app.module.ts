@@ -4,6 +4,7 @@ import { AppService } from './app.service';
 import { WhatsappModule } from './whatsapp/whatsapp.module';
 import { ConfigModule } from '@nestjs/config';
 import { TriageModule } from './triage/triage.module';
+import { RedisModule } from './session/redis.module';
 
 @Module({
   imports: [
@@ -12,8 +13,10 @@ import { TriageModule } from './triage/triage.module';
       envFilePath: '.env'
     }),
     WhatsappModule,
-    TriageModule],
+    TriageModule,
+    RedisModule
+  ],
   controllers: [AppController],
   providers: [AppService],
 })
-export class AppModule {}
+export class AppModule { }

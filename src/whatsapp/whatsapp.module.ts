@@ -8,6 +8,5 @@ import { TriageModule } from 'src/triage/triage.module';
     imports: [HttpModule, TriageModule],
     controllers: [WhatsappController],
     providers: [WhatsappService],
-    exports: [WhatsappService],
 })
 export class WhatsappModule {}
