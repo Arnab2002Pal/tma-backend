@@ -1,9 +1,13 @@
 import { Module } from '@nestjs/common';
 import { TriageService } from './triage.service';
 import { AiService } from './ai.service';
+import { IntakeService } from './intake.service';
+import { WhatsappModule } from 'src/whatsapp/whatsapp.module';
+import { WhatsappSendModule } from 'src/whatsapp/whatsapp-send.module';
 
 @Module({
-  providers: [TriageService, AiService],
-  exports: [TriageService, AiService]
+  imports: [WhatsappSendModule],
+  providers: [TriageService, AiService, IntakeService],
+  exports: [TriageService, AiService, IntakeService],
 })
 export class TriageModule {}

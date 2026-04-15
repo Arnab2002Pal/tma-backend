@@ -1,5 +1,7 @@
 export type SessionStep =
     | 'IDLE'
+    | 'AWAITING_SYMPTOM_CONFIRM' 
+    | 'AWAITING_EMERGENCY_CONFIRM'
     | 'AWAITING_Q1'
     | 'AWAITING_Q2'
     | 'AWAITING_Q3'
@@ -19,19 +21,22 @@ export interface IntakeAnswers {
     q5?: string; // associated flags
 }
 
+export interface TriageResult {
+    severity: 'mild' | 'moderate' | 'serious' | 'emergency';
+    care_layer: 1 | 2 | 3 | 4;
+    summary: string;
+    speciality_needed: string;
+    ai_guidance: string;
+    emergency_flag: boolean;
+}
+
 export interface WaSession {
     phone: string;
     step: SessionStep;
     symptomText: string;
+    detectedLanguage: string; 
     intakeAnswers: IntakeAnswers;
-    triageResult?: {
-        severity: string;
-        careLayer: number;
-        summary: string;
-        specialityNeeded: string;
-        aiGuidance: string;
-        emergencyFlag: boolean;
-    };
+    triageResult?: TriageResult;      // ← use the interface, not inline type
     clinicOptions?: any[];
     selectedClinicId?: string;
     bookingId?: string;
@@ -42,6 +47,7 @@ export interface WaSession {
 export const DEFAULT_SESSION = (phone: string): WaSession => ({
     phone,
     step: 'IDLE',
+    detectedLanguage: 'en',
     symptomText: '',
     intakeAnswers: {},
     lastUpdated: Date.now()
