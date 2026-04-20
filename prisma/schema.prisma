@@ -1,0 +1,401 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+  moduleFormat = "cjs"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+
+// ─── ENUMS ────────────────────────────────────────────────────────────────────
+
+enum BookingStatus {
+  PENDING_PAYMENT
+  CONFIRMED
+  EXPIRED
+  COMPLETED
+  DISPUTED
+  REFUNDED
+}
+
+enum ConsultationType {
+  IN_PERSON
+  PENDING_MORNING
+}
+
+enum PaymentGateway {
+  RAZORPAY
+  STRIPE
+}
+
+enum PaymentStatus {
+  PENDING
+  CAPTURED
+  FAILED
+  REFUNDED
+}
+
+enum EscrowEventType {
+  HELD
+  RELEASE_TRIGGERED
+  RELEASED
+  DISPUTED
+  ADMIN_OVERRIDE
+}
+
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED_TOURIST
+  RESOLVED_CLINIC
+  CLOSED
+}
+
+enum AiSessionType {
+  FREE
+  PAID
+}
+
+// ─── TOURIST ──────────────────────────────────────────────────────────────────
+
+model Tourist {
+  id                String     @id @default(cuid())
+  phone             String     @unique // E.164 format e.g. +919876543210
+  name              String?
+  nationality       String?
+  preferredLanguage String     @default("en") // ISO 639-1
+  travelInsurer     String?
+  policyNumber      String?
+  passportNo        String?    // encrypted at rest — never logged
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  bookings          Booking[]
+  aiSessions        AiSession[]
+  triageLogs        TriageLog[]
+  disputes          Dispute[]
+
+  @@map("tourists")
+}
+
+// ─── HOTEL ────────────────────────────────────────────────────────────────────
+
+model Hotel {
+  id                    String    @id @default(cuid())
+  name                  String
+  city                  String
+  address               String
+  lat                   Float     // for Google Maps Distance Matrix
+  lng                   Float
+  contactEmail          String
+  contactPhone          String    // WhatsApp-capable — used for after-hours alerts
+  token                 String    @unique @default(cuid()) // tma.app/h/{token}
+  totalRooms            Int       // registered at onboarding — used for QR PDF generation
+  isActive              Boolean   @default(true)  // flip false → all QR cards dead instantly
+  subscriptionActive    Boolean   @default(false)
+  subscriptionExpiresAt DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  bookings              Booking[]
+
+  @@map("hotels")
+}
+
+// ─── CLINIC ───────────────────────────────────────────────────────────────────
+
+model Clinic {
+  id             String   @id @default(cuid())
+
+  // INTERNAL ONLY — never returned to tourist, hotel, or hotel dashboard
+  name           String
+
+  // TOURIST-FACING ONLY — e.g. "TMA Verified Clinic — South Kolkata"
+  displayName    String
+
+  // Address is internal — tourist gets Google Maps deep link only
+  address        String
+  city           String
+  lat            Float
+  lng            Float
+
+  specialities   String[] // e.g. ["general physician", "ent specialist"]
+  languages      String[] // e.g. ["english", "hindi", "bengali"]
+
+  feeOpd         Int      // in paise — e.g. 50000 = Rs 500
+  feeNight       Int      // after-hours / midnight premium fee in paise
+
+  // { "open": 9, "close": 21 } — IST hours. Used for after-hours check.
+  availableHours Json
+
+  isVerified     Boolean  @default(false)
+  isActive       Boolean  @default(true)
+  strikeCount    Int      @default(0)
+
+  // Ranking signals — defaults used on Day 1, updated from booking data
+  rating         Float    @default(3.0)   // 0–5 scale
+  completionRate Float    @default(1.0)   // completed bookings / total bookings
+
+  // Internal on-call contact — never exposed
+  contactPhone   String
+
+  // Phase 2 teleconsult fields — stored now, not used in Phase 1 routing
+  canProvideTeleconsult      Boolean @default(false)
+  teleconsultAvailableHours  Json?   // { "open": 0, "close": 24 } for 24x7
+  teleconsultRateDay         Int?    // in paise
+  teleconsultRateNight       Int?    // midnight premium in paise
+
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  bookings       Booking[]
+  slots          ClinicSlot[]
+
+  @@map("clinics")
+}
+
+// ─── CLINIC SLOT ─────────────────────────────────────────────────────────────
+// Layer 2 teleconsult only — not used in Phase 1
+
+model ClinicSlot {
+  id        String   @id @default(cuid())
+  clinicId  String
+  date      DateTime
+  startTime DateTime
+  endTime   DateTime
+  isBooked  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  clinic    Clinic   @relation(fields: [clinicId], references: [id])
+  booking   Booking?
+
+  @@map("clinic_slots")
+}
+
+// ─── BOOKING ──────────────────────────────────────────────────────────────────
+
+model Booking {
+  id          String   @id @default(cuid())
+
+  // Tourist-facing code — verbal-friendly, 4 chars e.g. "MED-4721"
+  // Generated via sequential Redis counter per hotel per day
+  bookingCode String   @unique
+
+  touristId   String
+  clinicId    String
+  slotId      String?  @unique // Layer 2 teleconsult only
+
+  // Hotel context — stored separately, NOT embedded in bookingCode
+  hotelId     String?           // null if tourist entered independently
+  roomNumber  String?           // e.g. "106" — for hotel alerts and traceability
+  bookingDate DateTime @default(now())
+
+  careLayer         Int              // 1 / 2 / 3 / 4
+  severity          String           // mild / moderate / serious / emergency
+  symptomText       String           // raw tourist input
+  triageResult      Json             // full Haiku output stored for audit
+  specialityNeeded  String
+  consultationType  ConsultationType @default(IN_PERSON)
+
+  status      BookingStatus @default(PENDING_PAYMENT)
+  visitWindow String?       // soft window string e.g. "2pm–5pm today"
+  expiresAt   DateTime      // 24hrs from creation — code validity
+
+  // Visit confirmation flow
+  clinicConfirmed   Boolean   @default(false) // clinic marked visit COMPLETE
+  visitConfirmedAt  DateTime?                 // when clinic marked COMPLETE
+  prescriptionS3Key String?                   // S3 key for prescription PDF upload
+
+  // Tourist confirmation / dispute (24hr window after clinic marks COMPLETE)
+  touristConfirmedAt DateTime?
+  disputeRaisedAt    DateTime?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tourist     Tourist     @relation(fields: [touristId], references: [id])
+  clinic      Clinic      @relation(fields: [clinicId], references: [id])
+  hotel       Hotel?      @relation(fields: [hotelId], references: [id])
+  slot        ClinicSlot? @relation(fields: [slotId], references: [id])
+  payment     Payment?
+  visitProof  VisitProof?
+  dispute     Dispute?
+  escrowEvents EscrowEvent[]
+
+  @@map("bookings")
+}
+
+// ─── PAYMENT ─────────────────────────────────────────────────────────────────
+
+model Payment {
+  id                      String         @id @default(cuid())
+  bookingId               String         @unique
+
+  amountPaise             Int            // total amount charged in paise
+  gateway                 PaymentGateway @default(RAZORPAY)
+  gatewayPaymentId        String?        // Razorpay payment ID after capture
+  razorpayPaymentLinkId   String?        // payment link ID for expiry tracking
+  razorpayOrderId         String?        // order ID for reconciliation
+  status                  PaymentStatus  @default(PENDING)
+
+  commissionPaise         Int            // platform cut (15% OPD)
+  clinicPayoutPaise       Int            // clinic share (85% OPD)
+
+  // 30-min TTL — checked by hourly reconciliation job
+  paymentLinkExpiresAt    DateTime
+
+  capturedAt              DateTime?
+  releasedAt              DateTime?
+
+  // EventBridge rule ARN stored for cancellation on dispute
+  escrowEventBridgeRuleId String?
+
+  createdAt               DateTime       @default(now())
+  updatedAt               DateTime       @updatedAt
+
+  booking                 Booking        @relation(fields: [bookingId], references: [id])
+  escrowEvents            EscrowEvent[]
+
+  @@map("payments")
+}
+
+// ─── ESCROW EVENT ────────────────────────────────────────────────────────────
+
+model EscrowEvent {
+  id          String          @id @default(cuid())
+  bookingId   String
+  paymentId   String
+  eventType   EscrowEventType
+  triggeredBy String          // "system" | "admin" | "tourist" | "clinic"
+  metadata    Json?           // additional context
+  createdAt   DateTime        @default(now())
+
+  booking     Booking         @relation(fields: [bookingId], references: [id])
+  payment     Payment         @relation(fields: [paymentId], references: [id])
+
+  @@map("escrow_events")
+}
+
+// ─── VISIT PROOF ─────────────────────────────────────────────────────────────
+
+model VisitProof {
+  id               String   @id @default(cuid())
+  bookingId        String   @unique
+  patientPhotoS3Key String?
+  billS3Key        String?
+  billAmountPaise  Int?
+  billLineItems    Json?    // itemised bill
+  doctorName       String?  // internal only
+  doctorNotes      String?  // internal only
+  createdAt        DateTime @default(now())
+
+  booking          Booking  @relation(fields: [bookingId], references: [id])
+
+  @@map("visit_proofs")
+}
+
+// ─── DISPUTE ─────────────────────────────────────────────────────────────────
+
+model Dispute {
+  id                String        @id @default(cuid())
+  bookingId         String        @unique
+  raisedByTouristId String
+  reason            String
+  evidenceS3Key     String?
+  status            DisputeStatus @default(OPEN)
+  adminNotes        String?
+  refundAmountPaise Int?
+  resolvedAt        DateTime?
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  booking           Booking       @relation(fields: [bookingId], references: [id])
+  tourist           Tourist       @relation(fields: [raisedByTouristId], references: [id])
+
+  @@map("disputes")
+}
+
+// ─── HOSPITAL ────────────────────────────────────────────────────────────────
+// Non-partner reference data — for Layer 4 ER address + after-hours fallback
+// No commission. No booking flow. Reference only.
+
+model Hospital {
+  id              String   @id @default(cuid())
+  name            String
+  city            String
+  address         String
+  lat             Float
+  lng             Float
+  casualtyOpen24h Boolean  @default(false)
+  approxFeeRange  String?  // e.g. "Rs 500–1500"
+  mapsUrl         String?
+  phone           String?
+  createdAt       DateTime @default(now())
+
+  @@map("hospitals")
+}
+
+// ─── AI SESSION ───────────────────────────────────────────────────────────────
+
+model AiSession {
+  id           String        @id @default(cuid())
+  touristId    String
+  sessionType  AiSessionType
+  amountPaise  Int?          // null for FREE sessions
+  paymentId    String?
+  messagesJson Json          // full conversation history
+  createdAt    DateTime      @default(now())
+  expiresAt    DateTime
+
+  tourist      Tourist       @relation(fields: [touristId], references: [id])
+
+  @@map("ai_sessions")
+}
+
+// ─── TRIAGE LOG ───────────────────────────────────────────────────────────────
+// Audit trail for every triage event — never deleted
+
+model TriageLog {
+  id                   String   @id @default(cuid())
+  touristId            String?
+  hotelId              String?
+  inputText            String
+  voiceS3Key           String?  // original audio if voice message
+  detectedLanguage     String?
+  aiCareLayer          Int?
+  aiResponseRaw        Json?    // full Claude response stored
+  emergencyIntercepted Boolean  @default(false) // body-state keyword hit
+  afterHoursFallback   Boolean  @default(false) // after-hours L1 path triggered
+  responseTimeMs       Int?
+  createdAt            DateTime @default(now())
+
+  tourist              Tourist? @relation(fields: [touristId], references: [id])
+
+  @@map("triage_logs")
+}
+
+// ─── ON-CALL DOCTOR ──────────────────────────────────────────────────────────
+// Phase 2 — teleconsult doctor pool. Schema stored now, not used in Phase 1.
+
+model OnCallDoctor {
+  id                String   @id @default(cuid())
+  name              String
+  languages         String[]
+  speciality        String
+  feeDay            Int      // in paise
+  feeNight          Int      // midnight premium in paise
+  isAvailable       Boolean  @default(false)
+  availabilityHours Json?    // { "open": 9, "close": 22 }
+  clinicId          String?  // optional clinic affiliation
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@map("on_call_doctors")
+}
