@@ -5,6 +5,9 @@ import { WhatsappModule } from './whatsapp/whatsapp.module';
 import { ConfigModule } from '@nestjs/config';
 import { TriageModule } from './triage/triage.module';
 import { RedisModule } from './session/redis.module';
+import { PrismaService } from './database/prisma.service';
+import { PrismaModule } from './database/prisma.module';
+import { ClientModule } from './client/client.module';
 
 @Module({
   imports: [
@@ -14,7 +17,9 @@ import { RedisModule } from './session/redis.module';
     }),
     WhatsappModule,
     TriageModule,
-    RedisModule
+    RedisModule,
+    PrismaModule,
+    ClientModule
   ],
   controllers: [AppController],
   providers: [AppService],
