@@ -8,6 +8,7 @@ import { RedisModule } from './session/redis.module';
 import { PrismaService } from './database/prisma.service';
 import { PrismaModule } from './database/prisma.module';
 import { ClinicModule } from './client/clinic.module';
+import { BookingModule } from './booking/booking.module';
 
 @Module({
   imports: [
@@ -19,7 +20,8 @@ import { ClinicModule } from './client/clinic.module';
     TriageModule,
     RedisModule,
     PrismaModule,
-    ClinicModule
+    ClinicModule,
+    BookingModule
   ],
   controllers: [AppController],
   providers: [AppService],

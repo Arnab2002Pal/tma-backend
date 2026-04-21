@@ -12,6 +12,7 @@ export class RedisService implements OnModuleInit {
     private readonly memoryFallback = new Map<string, WaSession>();
     private redisAvailable = false;
     private healthCheckTimer: NodeJS.Timeout | null = null;
+    private memoryCounters: Map<string, number> = new Map();
 
     constructor(@Inject(REDIS_CLIENT) private readonly redis: Redis) { }
 
@@ -68,6 +69,22 @@ export class RedisService implements OnModuleInit {
         this.memoryFallback.delete(phone);
     }
 
+    // ─── Session TTL override ───────────────────────────────────
+    // Used after after-hours L1 guidance — shorten TTL to 2–3hrs
+
+    async setSessionTTL(phone: string, ttlSeconds: number): Promise<void> {
+        if (this.redisAvailable) {
+            try {
+                await this.redis.expire(`${SESSION_PREFIX}${phone}`, ttlSeconds);
+                return;
+            } catch (err: any) {
+                console.error('[Session] Redis expire failed:', err.message);
+            }
+        }
+        // Memory fallback — TTL not enforced, session will persist until cleared
+        // Acceptable: after-hours L1 is a low-risk path
+    }
+
     // ─── Dedup ─────────────────────────────────────────────────
 
     async isDuplicate(wamid: string): Promise<boolean> {
@@ -86,6 +103,32 @@ export class RedisService implements OnModuleInit {
             }
         }
         return false; // memory fallback → allow through
+    }
+
+    // ─── Counter (booking code generation) ─────────────────────
+    // Atomic INCR — thread-safe, no race conditions
+    // Key pattern: booking_counter:{hotelId}:{YYYYMMDD}
+
+    async incrementCounter(key: string, ttlSeconds: number): Promise<number> {
+        if (this.redisAvailable) {
+            try {
+                const value = await this.redis.incr(key);
+                // Set TTL only on first increment to avoid resetting on every call
+                if (value === 1) {
+                    await this.redis.expire(key, ttlSeconds);
+                }
+                return value;
+            } catch (err: any) {
+                console.error(`[Session] incrementCounter failed for ${key}:`, err.message);
+                // Fall through to in-memory fallback
+            }
+        }
+
+        // In-memory fallback — safe for single-instance dev
+        // In production Redis will always be available
+        const current = (this.memoryCounters.get(key) ?? 0) + 1;
+        this.memoryCounters.set(key, current);
+        return current;
     }
 
     // ─── Redis health ───────────────────────────────────────────
