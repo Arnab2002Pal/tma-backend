@@ -7,7 +7,7 @@ import { TriageModule } from './triage/triage.module';
 import { RedisModule } from './session/redis.module';
 import { PrismaService } from './database/prisma.service';
 import { PrismaModule } from './database/prisma.module';
-import { ClientModule } from './client/client.module';
+import { ClinicModule } from './client/clinic.module';
 
 @Module({
   imports: [
@@ -19,7 +19,7 @@ import { ClientModule } from './client/client.module';
     TriageModule,
     RedisModule,
     PrismaModule,
-    ClientModule
+    ClinicModule
   ],
   controllers: [AppController],
   providers: [AppService],
