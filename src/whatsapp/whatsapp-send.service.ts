@@ -61,6 +61,22 @@ export class WhatsappSendService {
     }
 
     async sendListMessage(to: string, bodyText: string, sections: any[]): Promise<void> {
+        // WhatsApp List Message API hard limits — enforced here so no call site can forget:
+        // row title: 24 chars max | row description: 72 chars max | section title: 24 chars max
+        const sanitizedSections = sections.map((section) => ({
+            ...section,
+            ...(section.title && {
+                title: this.truncate(section.title, 24),
+            }),
+            rows: (section.rows ?? []).map((row: any) => ({
+                ...row,
+                title: this.truncate(row.title, 24),
+                ...(row.description && {
+                    description: this.truncate(row.description, 72),
+                }),
+            })),
+        }));
+
         await firstValueFrom(
             this.httpService.post(
                 `${this.baseUrl}/messages`,
@@ -71,11 +87,18 @@ export class WhatsappSendService {
                     interactive: {
                         type: 'list',
                         body: { text: bodyText },
-                        action: { button: 'Select', sections },
+                        action: { button: 'Select', sections: sanitizedSections },
                     },
                 },
                 { headers: { Authorization: `Bearer ${this.token}` } },
             ),
         );
+    }
+
+    // Truncates to maxLen, appending '…' (single char, U+2026) so the cut is obvious.
+    // 1-char ellipsis wastes as little of the limit as possible vs '...' (3 chars).
+    private truncate(text: string, maxLen: number): string {
+        if (text.length <= maxLen) return text;
+        return text.slice(0, maxLen - 1) + '…';
     }
 }

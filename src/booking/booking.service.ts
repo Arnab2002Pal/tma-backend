@@ -3,7 +3,6 @@ import { PrismaService } from 'src/database/prisma.service';
 import { RedisService } from 'src/session/redis.service';
 import { BookingConfirmation, CreateBookingInput } from './booking.type';
 import { BookingStatus, ConsultationType } from 'src/generated/prisma/enums';
-import { Prisma } from '@prisma/client';
 import { ClinicAvailableHours } from 'src/client/clinic.types';
 
 // IST offset in hours — hardcoded, all operations in India
@@ -16,10 +15,6 @@ const BOOKING_EXPIRY_HOURS = 24;
 // Key: booking_counter:{hotelId}:{YYYYMMDD}  TTL: 48hrs
 const COUNTER_KEY = (hotelId: string, dateStr: string) =>
     `booking_counter:${hotelId}:${dateStr}`;
-
-// For independent tourists (no hotel) — use a shared daily counter
-const INDEPENDENT_COUNTER_KEY = (dateStr: string) =>
-    `booking_counter:independent:${dateStr}`;
 
 // Counter TTL — 48hrs so counters from yesterday don't collide
 const COUNTER_TTL_SECONDS = 48 * 60 * 60;
@@ -44,12 +39,17 @@ export class BookingService {
             hotelId,
             roomNumber,
             consultationType = ConsultationType.IN_PERSON,
+            language,
         } = input;
 
         // 1 — Find or create tourist
-        const tourist = await this.upsertTourist(touristPhone);
+        const tourist = await this.upsertTourist(touristPhone, language);
 
         // 2 — Generate unique MED-XXXX code
+        // hotelId is always required in Phase 1 — all tourists enter via hotel QR
+        if (!hotelId) {
+            throw new Error('hotelId is required for booking in Phase 1. Tourist must enter via hotel QR.');
+        }
         const bookingCode = await this.generateBookingCode(hotelId);
 
         // 3 — Compute soft visit window from clinic hours
@@ -73,7 +73,7 @@ export class BookingService {
                 careLayer: triageResult.care_layer,
                 severity: triageResult.severity,
                 symptomText,
-                triageResult: JSON.parse(JSON.stringify(triageResult)), // Prisma doesn't support nested objects well
+                triageResult: JSON.parse(JSON.stringify(triageResult)),
                 specialityNeeded: triageResult.speciality_needed,
                 consultationType,
                 status: BookingStatus.PENDING_PAYMENT,
@@ -112,11 +112,9 @@ export class BookingService {
      * Different hotel or different day = different counter key.
      * Tourist-facing: short, verbal-friendly, no hotel/room info embedded.
      */
-    private async generateBookingCode(hotelId?: string): Promise<string> {
+    private async generateBookingCode(hotelId: string): Promise<string> {
         const dateStr = this.getISTDateString(); // YYYYMMDD
-        const counterKey = hotelId
-            ? COUNTER_KEY(hotelId, dateStr)
-            : INDEPENDENT_COUNTER_KEY(dateStr);
+        const counterKey = COUNTER_KEY(hotelId, dateStr);
 
         // Atomic increment in Redis — thread-safe, no race condition
         const counter = await this.redisService.incrementCounter(counterKey, COUNTER_TTL_SECONDS);
@@ -192,13 +190,13 @@ export class BookingService {
      * Find existing tourist by phone or create a new minimal record.
      * Tourist profile is enriched over time — only phone required at booking.
      */
-    private async upsertTourist(phone: string) {
+    private async upsertTourist(phone: string, language: string = 'en') {
         return this.prisma.tourist.upsert({
             where: { phone },
             update: {},  // no updates on existing tourist at booking time
             create: {
                 phone,
-                preferredLanguage: 'en', // updated from session detectedLanguage later
+                preferredLanguage: language,
             },
         });
     }

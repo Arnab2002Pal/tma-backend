@@ -9,6 +9,7 @@ import { PrismaService } from './database/prisma.service';
 import { PrismaModule } from './database/prisma.module';
 import { ClinicModule } from './client/clinic.module';
 import { BookingModule } from './booking/booking.module';
+import { SeedModule } from './seed/seed.module';
 
 @Module({
   imports: [
@@ -21,7 +22,8 @@ import { BookingModule } from './booking/booking.module';
     RedisModule,
     PrismaModule,
     ClinicModule,
-    BookingModule
+    BookingModule,
+    SeedModule
   ],
   controllers: [AppController],
   providers: [AppService],
