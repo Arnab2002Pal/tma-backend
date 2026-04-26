@@ -7,9 +7,10 @@ export interface CreateBookingInput {
     clinic: RankedClinic;        // selected clinic from list
     triageResult: TriageResult;  // full Haiku output
     symptomText: string;         // raw tourist input
-    hotelId?: string;            // null if tourist entered independently
-    roomNumber?: string;         // null if no hotel
+    hotelId: string;             // always required in Phase 1 — tourist enters via hotel QR
+    roomNumber?: string;         // null if room not captured (shouldn't happen in Phase 1)
     consultationType?: ConsultationType;
+    language: string;           // ISO code, e.g. 'en', 'hi' — used to set tourist preferredLanguage at booking time
 }
 
 export interface BookingConfirmation {

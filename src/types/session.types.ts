@@ -1,6 +1,6 @@
 export type SessionStep =
     | 'IDLE'
-    | 'AWAITING_SYMPTOM_CONFIRM' 
+    | 'AWAITING_SYMPTOM_CONFIRM'
     | 'AWAITING_EMERGENCY_CONFIRM'
     | 'AWAITING_Q1'
     | 'AWAITING_Q2'
@@ -34,13 +34,15 @@ export interface WaSession {
     phone: string;
     step: SessionStep;
     symptomText: string;
-    detectedLanguage: string; 
+    detectedLanguage: string;       // ISO 639-1 from Whisper verbose_json
     intakeAnswers: IntakeAnswers;
-    triageResult?: TriageResult;      // ← use the interface, not inline type
-    clinicOptions?: any[];
+    triageResult?: TriageResult;
+    clinicOptions?: any[];          // RankedClinic[] — stored as any to avoid circular deps
     selectedClinicId?: string;
     bookingId?: string;
-    hotelId?: string;
+    hotelId?: string;               // null if tourist entered independently (not via hotel QR)
+    roomNumber?: string;            // v4.2 — e.g. "106", null if no hotel
+    isAfterHours?: boolean;         // v4.2 — set when after-hours path triggered
     lastUpdated: number;
 }
 
@@ -50,5 +52,5 @@ export const DEFAULT_SESSION = (phone: string): WaSession => ({
     detectedLanguage: 'en',
     symptomText: '',
     intakeAnswers: {},
-    lastUpdated: Date.now()
-})
+    lastUpdated: Date.now(),
+});

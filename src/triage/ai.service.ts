@@ -72,29 +72,39 @@ export class AiService {
     }
 
     // ─── Haiku Emergency Context Check ─────────────────────────
-    async isEmergencyContext(symptomText: string): Promise<boolean> {
-        const prompt = `A tourist sent this message: "${symptomText}"
-        Determine if this is a genuine emergency requiring immediate emergency services (112).
+    // attempt=1 on first call; retried once (attempt=2) on SyntaxError before
+    // giving up and throwing EmergencyCheckUncertainError → YES/NO prompt.
+    async isEmergencyContext(symptomText: string, attempt = 1): Promise<boolean> {
+        // FIX 1: symptomText is interpolated directly — no unreplaced {{SYMPTOM_TEXT}} placeholder.
+        // FIX 2: temperature: 0 — eliminates prose/greeting responses from Haiku.
+        const prompt = `You are a medical emergency screener. Your ONLY job is to detect life-threatening emergencies.
 
-        Emergency = true if: person is in immediate danger RIGHT NOW.
-        Emergency = false if: symptom is mild, historical, after physical activity, context-qualified, or a general question.
+        Return {"emergency": true} ONLY if the symptoms describe one or more of these exact conditions:
+        - Unconscious or unresponsive
+        - Not breathing or stopped breathing
+        - Collapsed (sudden, complete loss of posture — not just weakness or fatigue)
+        - Anaphylaxis or throat closing
+        - Active seizure or febrile seizure
+        - Uncontrolled or major bleeding
+        - Heart attack symptoms (chest pain + arm/jaw pain)
+        - Stroke symptoms (face drooping, arm weakness, slurred speech simultaneously)
 
-        Examples:
-        "chest pain after climbing mountain for 2 hours" → false
-        "I have had chest pain since yesterday, mild" → false
-        "sudden chest pain right now cant breathe" → true
-        "difficulty breathing after running" → false
-        "I cannot breathe, throat is closing" → true
+        Return {"emergency": false} for:
+        - General weakness, fatigue, or tiredness
+        - Inability to stand due to weakness or dizziness (not collapse/syncope)
+        - Stomach problems, nausea, vomiting, diarrhoea
+        - Fever, headache, body ache
+        - Any symptom that is uncomfortable but not immediately life-threatening
 
-        Do not wrap the JSON in markdown code fences.
-        Return ONLY valid JSON. No explanation. No markdown.
-        {"emergency": true} or {"emergency": false}`;
+        The tourist's symptoms: "${symptomText}"
+
+        Do not write anything other than the JSON object. No greeting, no explanation. ONLY: {"emergency": true} or {"emergency": false}`;
 
         try {
             const response = await this.anthropic.messages.create({
                 model: 'claude-haiku-4-5-20251001',
                 max_tokens: 20,
-                temperature: 0.1,
+                temperature: 0, // FIX 2: was 0.1 — zero temperature prevents prose responses
                 messages: [{ role: 'user', content: prompt }],
             });
 
@@ -112,7 +122,19 @@ export class AiService {
             const parsed = JSON.parse(clean);
             return parsed.emergency === true;
         } catch (error) {
-            console.error('[AiService] Emergency context check failed:', error);
+            // FIX 3: distinguish parse failure from API/network errors.
+            // SyntaxError means Haiku returned non-JSON (model output failure, not symptom
+            // uncertainty). Retry once — prose response is usually a one-off fluke.
+            // After retry exhausted, or on non-parse errors, throw → YES/NO prompt upstream.
+            if (error instanceof SyntaxError) {
+                if (attempt === 1) {
+                    console.warn('[AiService] Haiku returned non-JSON on attempt 1 — retrying');
+                    return this.isEmergencyContext(symptomText, 2);
+                }
+                console.error('[AiService] Haiku returned non-JSON after retry — escalating to UNCERTAIN');
+            } else {
+                console.error('[AiService] Emergency context check failed:', error);
+            }
             throw new EmergencyCheckUncertainError();
         }
     }
@@ -232,7 +254,7 @@ export class AiService {
 
         CONTEXT: Tourist is away from home in an unfamiliar city. Assume minimal resources. Hotel room only.`;
 
-                const userPrompt = `Tourist symptom: "${symptomText}"
+        const userPrompt = `Tourist symptom: "${symptomText}"
         Severity: ${intakeAnswers.q1 ?? 'mild'}
         Trajectory: ${intakeAnswers.q2 ?? 'staying same'}
         Duration: ${intakeAnswers.q3 ?? 'few hours'}
@@ -260,4 +282,77 @@ export class AiService {
             return 'Please rest, stay hydrated, and monitor your symptoms. Drink plenty of water and avoid exertion.';
         }
     }
+
+    // Called by whatsapp.service.ts → handleAfterHours()
+    // Augments the standard L1 system prompt with hotel staff context
+    // All existing rules still apply: no drugs, no brands, no dosages
+    async getL1GuidanceAfterHours(
+        symptomText: string,
+        intakeAnswers: IntakeAnswers,
+        language: string = 'en',
+    ): Promise<string> {
+        const languageNames: Record<string, string> = {
+            en: 'English', hi: 'Hindi', bn: 'Bengali',
+            fr: 'French', de: 'German', es: 'Spanish',
+            ja: 'Japanese', zh: 'Chinese', ar: 'Arabic',
+            ru: 'Russian', pt: 'Portuguese', ko: 'Korean',
+        };
+        const languageName = languageNames[language] ?? 'English';
+
+        const systemPrompt = `You are a compassionate medical guidance assistant for tourists who are experiencing symptoms at night, when clinics are closed.
+ 
+        SITUATION: The tourist is in a hotel room. It is nighttime. No clinic is available until morning. Hotel staff may be able to help with basic items.
+        
+        STRICT RULES — NEVER VIOLATE:
+        1. Never name specific medicines, brands, or drug molecules
+        2. Never give dosage instructions of any kind
+        3. Never suggest anything requiring a prescription
+        4. Never diagnose a condition by name
+        5. Keep response to 3-4 short steps maximum
+        6. Warm, calm, reassuring tone — tourist is anxious and it is nighttime
+        
+        WHAT YOU CAN SUGGEST:
+        - Rest and sleep
+        - Hydration (plain water, coconut water, clear fluids)
+        - Light easily digestible food (plain rice, toast, banana)
+        - Positioning (elevate legs, sit upright, lie on left side)
+        - Temperature management (cool wet cloth on forehead, warm compress on stomach)
+        - Breathing techniques for anxiety or mild breathlessness
+        - ONE generic OTC category if genuinely needed — phrased as "a simple painkiller available at any pharmacy" — never a name
+        
+        HOTEL STAFF CONTEXT (include naturally if relevant):
+        - Tourist can call hotel reception for: extra blankets, hot water, basic first aid kit
+        - Tourist can ask hotel staff: "Do you have anything for fever/stomach discomfort?"
+        - Phrase as a gentle suggestion, not a medical instruction
+        - Never specify what drug the hotel staff should provide`;
+
+        const userPrompt = `Tourist symptom: "${symptomText}"
+        Severity: ${intakeAnswers.q1 ?? 'unknown'}
+        Trajectory: ${intakeAnswers.q2 ?? 'unknown'}
+        Duration: ${intakeAnswers.q3 ?? 'unknown'}
+        Functional impact: ${intakeAnswers.q4 ?? 'unknown'}
+        Associated symptoms: ${intakeAnswers.q5 ?? 'none'}
+        
+        It is currently nighttime and clinics are closed. Respond in ${languageName}.`;
+
+        try {
+            const response = await this.anthropic.messages.create({
+                model: 'claude-sonnet-4-5',
+                max_tokens: 1000,
+                temperature: 0.7,
+                system: systemPrompt,
+                messages: [{ role: 'user', content: userPrompt }],
+            });
+
+            return response.content
+                .filter((b) => b.type === 'text')
+                .map((b) => b.text)
+                .join('')
+                .trim();
+        } catch (error) {
+            console.error('[AiService] After-hours L1 guidance failed:', error);
+            return 'Please rest and stay hydrated. Drink plain water and try to sleep. Ask hotel reception if they have a basic first aid kit or something for comfort. Clinics will be available from 8am.';
+        }
+    }
+
 }
