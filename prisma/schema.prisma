@@ -1,8 +1,6 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider = "prisma-client"
   output   = "../src/generated/prisma"
@@ -95,18 +93,41 @@ model Hotel {
   lat                   Float     // for Google Maps Distance Matrix
   lng                   Float
   contactEmail          String
-  contactPhone          String    // WhatsApp-capable — used for after-hours alerts
-  token                 String    @unique @default(cuid()) // tma.app/h/{token}
-  totalRooms            Int       // registered at onboarding — used for QR PDF generation
-  isActive              Boolean   @default(true)  // flip false → all QR cards dead instantly
+  contactPhone          String?
+
+  // QR token — used in tma.app/h/{qrToken}?room={roomNumber}
+  // Replaces the old `token` field. Opaque UUID, never guessable.
+  qrToken               String    @unique @default(uuid())
+
+  totalRooms            Int       @default(0)
+  isActive              Boolean   @default(true)
   subscriptionActive    Boolean   @default(false)
   subscriptionExpiresAt DateTime?
+
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 
   bookings              Booking[]
+  rooms                 HotelRoom[]
 
   @@map("hotels")
+}
+
+// ─── HOTEL ROOM ───────────────────────────────────────────────────────────────
+
+model HotelRoom {
+  id          String   @id @default(uuid())
+  hotelId     String
+  floorNumber Int
+  roomNumber  String   // e.g. "305" — string to support custom labels later
+  qrUrl       String   // https://tma.app/h/{qrToken}?room={roomNumber}
+  createdAt   DateTime @default(now())
+
+  hotel       Hotel    @relation(fields: [hotelId], references: [id])
+
+  @@unique([hotelId, roomNumber])
+  @@index([hotelId])
+  @@map("hotel_rooms")
 }
 
 // ─── CLINIC ───────────────────────────────────────────────────────────────────
@@ -116,10 +137,8 @@ model Clinic {
 
   // INTERNAL ONLY — never returned to tourist, hotel, or hotel dashboard
   name           String
-
   // TOURIST-FACING ONLY — e.g. "TMA Verified Clinic — South Kolkata"
   displayName    String
-
   // Address is internal — tourist gets Google Maps deep link only
   address        String
   city           String
@@ -128,30 +147,24 @@ model Clinic {
 
   specialities   String[] // e.g. ["general physician", "ent specialist"]
   languages      String[] // e.g. ["english", "hindi", "bengali"]
-
   feeOpd         Int      // in paise — e.g. 50000 = Rs 500
   feeNight       Int      // after-hours / midnight premium fee in paise
 
   // { "open": 9, "close": 21 } — IST hours. Used for after-hours check.
   availableHours Json
-
   isVerified     Boolean  @default(false)
   isActive       Boolean  @default(true)
   strikeCount    Int      @default(0)
-
   // Ranking signals — defaults used on Day 1, updated from booking data
   rating         Float    @default(3.0)   // 0–5 scale
   completionRate Float    @default(1.0)   // completed bookings / total bookings
 
   // Internal on-call contact — never exposed
   contactPhone   String
-
-  // Phase 2 teleconsult fields — stored now, not used in Phase 1 routing
   canProvideTeleconsult      Boolean @default(false)
-  teleconsultAvailableHours  Json?   // { "open": 0, "close": 24 } for 24x7
-  teleconsultRateDay         Int?    // in paise
-  teleconsultRateNight       Int?    // midnight premium in paise
-
+  teleconsultAvailableHours  Json?
+  teleconsultRateDay         Int?
+  teleconsultRateNight       Int?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -162,7 +175,6 @@ model Clinic {
 }
 
 // ─── CLINIC SLOT ─────────────────────────────────────────────────────────────
-// Layer 2 teleconsult only — not used in Phase 1
 
 model ClinicSlot {
   id        String   @id @default(cuid())
@@ -183,11 +195,9 @@ model ClinicSlot {
 
 model Booking {
   id          String   @id @default(cuid())
-
   // Tourist-facing code — verbal-friendly, 4 chars e.g. "MED-4721"
   // Generated via sequential Redis counter per hotel per day
   bookingCode String   @unique
-
   touristId   String
   clinicId    String
   slotId      String?  @unique // Layer 2 teleconsult only
@@ -203,7 +213,6 @@ model Booking {
   triageResult      Json             // full Haiku output stored for audit
   specialityNeeded  String
   consultationType  ConsultationType @default(IN_PERSON)
-
   status      BookingStatus @default(PENDING_PAYMENT)
   visitWindow String?       // soft window string e.g. "2pm–5pm today"
   expiresAt   DateTime      // 24hrs from creation — code validity
@@ -216,7 +225,6 @@ model Booking {
   // Tourist confirmation / dispute (24hr window after clinic marks COMPLETE)
   touristConfirmedAt DateTime?
   disputeRaisedAt    DateTime?
-
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -237,8 +245,7 @@ model Booking {
 model Payment {
   id                      String         @id @default(cuid())
   bookingId               String         @unique
-
-  amountPaise             Int            // total amount charged in paise
+  amountPaise             Int
   gateway                 PaymentGateway @default(RAZORPAY)
   gatewayPaymentId        String?        // Razorpay payment ID after capture
   razorpayPaymentLinkId   String?        // payment link ID for expiry tracking
@@ -247,16 +254,12 @@ model Payment {
 
   commissionPaise         Int            // platform cut (15% OPD)
   clinicPayoutPaise       Int            // clinic share (85% OPD)
-
   // 30-min TTL — checked by hourly reconciliation job
   paymentLinkExpiresAt    DateTime
-
   capturedAt              DateTime?
   releasedAt              DateTime?
-
   // EventBridge rule ARN stored for cancellation on dispute
   escrowEventBridgeRuleId String?
-
   createdAt               DateTime       @default(now())
   updatedAt               DateTime       @updatedAt
 
@@ -323,8 +326,6 @@ model Dispute {
 }
 
 // ─── HOSPITAL ────────────────────────────────────────────────────────────────
-// Non-partner reference data — for Layer 4 ER address + after-hours fallback
-// No commission. No booking flow. Reference only.
 
 model Hospital {
   id              String   @id @default(cuid())
@@ -360,7 +361,6 @@ model AiSession {
 }
 
 // ─── TRIAGE LOG ───────────────────────────────────────────────────────────────
-// Audit trail for every triage event — never deleted
 
 model TriageLog {
   id                   String   @id @default(cuid())
@@ -382,7 +382,6 @@ model TriageLog {
 }
 
 // ─── ON-CALL DOCTOR ──────────────────────────────────────────────────────────
-// Phase 2 — teleconsult doctor pool. Schema stored now, not used in Phase 1.
 
 model OnCallDoctor {
   id                String   @id @default(cuid())

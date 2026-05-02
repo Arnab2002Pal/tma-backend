@@ -67,8 +67,53 @@ export class IntakeService {
             '2 — Fever or chills\n' +
             '3 — Shortness of breath\n' +
             '4 — None of the above\n\n' +
-            '_Reply with the number (1, 2, 3, or 4)_',
+            '_Reply with one or more numbers separated by commas_\n' +
+            '_Example: *1, 3* or just *4* if none apply_',
         );
+    }
+
+    /**
+     * Parses a multi-select Q5 reply.
+     *
+     * Valid inputs:   "1", "2,3", "1, 2, 3", "1,3"
+     * Invalid inputs: "5", "1,5", "abc", ""
+     *
+     * Rules:
+     *   - At least one valid number (1–4)
+     *   - If 4 (none) is selected alongside others → treat as "None of the above" only
+     *     (tourist may have selected 4 by mistake alongside real symptoms)
+     *   - Returns null if input is entirely invalid
+     */
+    parseQ5Answer(raw: string): string | null {
+        const VALID = new Set(['1', '2', '3', '4']);
+
+        const parts = raw
+            .split(',')
+            .map(s => s.trim())
+            .filter(s => s.length > 0);
+
+        if (parts.length === 0) return null;
+
+        // Check all parts are valid numbers
+        if (parts.some(p => !VALID.has(p))) return null;
+
+        // Deduplicate
+        const unique = [...new Set(parts)];
+
+        // If "4 — None of the above" is mixed with real symptoms, discard 4
+        // Tourist likely tapped multiple by mistake
+        if (unique.includes('4') && unique.length > 1) {
+            unique.splice(unique.indexOf('4'), 1);
+        }
+
+        const labelMap: Record<string, string> = {
+            '1': 'Nausea or vomiting',
+            '2': 'Fever or chills',
+            '3': 'Shortness of breath',
+            '4': 'None of the above',
+        };
+
+        return unique.map(n => labelMap[n]).join(', ');
     }
 
     // Human-readable label from button ID — used when feeding answers to Haiku

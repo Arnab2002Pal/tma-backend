@@ -7,10 +7,11 @@ import { WhatsappSendService } from './whatsapp-send.service';
 import { WhatsappSendModule } from './whatsapp-send.module';
 import { ClinicModule } from 'src/client/clinic.module';
 import { BookingModule } from 'src/booking/booking.module';
+import { WhatsappQrHandler } from './whatsapp-qr.handler';
 
 @Module({
     imports: [HttpModule, TriageModule, WhatsappSendModule, ClinicModule, BookingModule],
     controllers: [WhatsappController],
-    providers: [WhatsappService, WhatsappSendService],
+    providers: [WhatsappService, WhatsappSendService, WhatsappQrHandler],
 })
 export class WhatsappModule { }
