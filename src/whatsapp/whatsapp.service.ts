@@ -12,6 +12,7 @@ import { TriageResult, WaSession } from 'src/types/session.types';
 import { ClinicService } from 'src/client/clinic.service';
 import { PrismaService } from 'src/database/prisma.service';
 import { RankedClinic } from 'src/client/clinic.types';
+import { WhatsappQrHandler } from './whatsapp-qr.handler';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -41,6 +42,7 @@ export class WhatsappService {
         private readonly sessionService: RedisService,
         private readonly whatsappSend: WhatsappSendService,
         private readonly prisma: PrismaService,
+        private readonly qrHandler: WhatsappQrHandler,
     ) {
         this.baseUrl = `https://graph.facebook.com/v21.0/${this.config.get('WHATSAPP_PHONE_NUMBER_ID')!}`;
         this.token = this.config.get('WHATSAPP_ACCESS_TOKEN')!;
@@ -135,9 +137,32 @@ export class WhatsappService {
         from: string,
         text: string,
         session: WaSession,
-    ): Promise<void> {
+    ) {
 
-        // DOCTOR keyword — behaviour depends on time of day
+        // ── QR prefill message — runs before everything else ────────────────────
+        // Tourist just scanned hotel room QR.
+        // Message contains: "I need medical help. Room 303 · Taj Bengal · TMA-{hotelId}-{roomNumber}"
+        if (this.qrHandler.isStartMessage(text)) {
+            await this.qrHandler.handleStart(from, text, session);
+            return;
+        }
+
+        // ── No hotel context — tourist reached us without scanning QR ───────────
+        // Covers: found number directly, edited/deleted the prefill before sending,
+        // sent something else entirely instead of the prefilled message.
+        // Exception: session.step !== 'IDLE' means they are mid-conversation (already
+        // scanned previously and are continuing) — let them through.
+        console.log('Session at text handler:', session);
+        if (!session.hotelId) {
+            await this.qrHandler.sendScanQrMessage(from);
+            return;
+        }
+
+        // ── Tourist is mid-conversation (has hotelId, step is not IDLE) ──────────
+        // They sent a free-text message during an active session.
+        // Route normally below.
+
+        // DOCTOR keyword
         if (text.toLowerCase() === 'doctor') {
             await this.handleDoctorKeyword(from, session);
             return;
@@ -146,17 +171,21 @@ export class WhatsappService {
         // Q5 number reply — intercept before emergency check
         if (session.step === 'AWAITING_Q5') {
             const trimmed = text.trim();
-            if (['1', '2', '3', '4'].includes(trimmed)) {
-                session.intakeAnswers.q5 = this.intakeService.getLabelForAnswer(trimmed);
-                session.step = 'AWAITING_TRIAGE';
-                await this.sessionService.saveSession(session);
-                await this.runFinalTriage(from, session);
-            } else {
+            const parsed = this.intakeService.parseQ5Answer(trimmed);
+
+            if (!parsed) {
                 await this.whatsappSend.sendTextMessage(
                     from,
-                    'Please reply with *1*, *2*, *3*, or *4* to continue.',
+                    'Please reply with numbers between 1–4, separated by commas.\n\n' +
+                    '_Example: *1, 3* for nausea and shortness of breath, or *4* if none apply._',
                 );
+                return;
             }
+
+            session.intakeAnswers.q5 = parsed;
+            session.step = 'AWAITING_TRIAGE';
+            await this.sessionService.saveSession(session);
+            await this.runFinalTriage(from, session);
             return;
         }
 

@@ -32,7 +32,9 @@
     "axios": "^1.14.0",
     "ioredis": "^5.10.1",
     "openai": "^6.33.0",
+    "pdfkit": "^0.18.0",
     "pg": "^8.20.0",
+    "qrcode": "^1.5.4",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1"
   },
@@ -46,6 +48,8 @@
     "@types/ioredis": "^4.28.10",
     "@types/jest": "^30.0.0",
     "@types/node": "^22.10.7",
+    "@types/pdfkit": "^0.17.6",
+    "@types/qrcode": "^1.5.6",
     "@types/supertest": "^6.0.2",
     "eslint": "^9.18.0",
     "eslint-config-prettier": "^10.0.1",

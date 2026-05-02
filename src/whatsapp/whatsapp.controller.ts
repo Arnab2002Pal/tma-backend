@@ -1,16 +1,12 @@
 import { Controller, Get, Post, Body, Query, HttpCode, HttpStatus } from '@nestjs/common';
 import { WhatsappService } from './whatsapp.service';
 import { ConfigService } from '@nestjs/config';
-import { AiService } from 'src/triage/ai.service';
-import { TriageService } from 'src/triage/triage.service';
 
 @Controller('whatsapp')
 export class WhatsappController {
     constructor(
         private readonly whatsappService: WhatsappService,
         private readonly config: ConfigService,
-        private readonly aiService: AiService,
-        private readonly triageService: TriageService,
     ) { }
 
     @Get('webhook')

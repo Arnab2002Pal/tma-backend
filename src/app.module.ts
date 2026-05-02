@@ -10,6 +10,7 @@ import { PrismaModule } from './database/prisma.module';
 import { ClinicModule } from './client/clinic.module';
 import { BookingModule } from './booking/booking.module';
 import { SeedModule } from './seed/seed.module';
+import { HotelQrModule } from './hotel-qr/hotel-qr.module';
 
 @Module({
   imports: [
@@ -23,7 +24,8 @@ import { SeedModule } from './seed/seed.module';
     PrismaModule,
     ClinicModule,
     BookingModule,
-    SeedModule
+    SeedModule,
+    HotelQrModule
   ],
   controllers: [AppController],
   providers: [AppService],
