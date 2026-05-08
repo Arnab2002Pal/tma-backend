@@ -22,7 +22,7 @@ export interface IntakeAnswers {
 }
 
 export interface TriageResult {
-    severity: 'mild' | 'moderate' | 'serious' | 'emergency';
+    severity: 'mild' | 'moderate' | 'serious' | 'emergency' | 'undetermined';
     care_layer: 1 | 2 | 3 | 4;
     summary: string;
     speciality_needed: string;

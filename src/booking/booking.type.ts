@@ -1,6 +1,6 @@
-import { RankedClinic } from 'src/client/clinic.types';
-import { ConsultationType } from 'src/generated/prisma/enums';
-import { TriageResult } from 'src/types/session.types';
+import { RankedClinic } from "../client/clinic.types";
+import { ConsultationType } from "../generated/prisma/enums";
+import { TriageResult } from "../types/session.types";
 
 export interface CreateBookingInput {
     touristPhone: string;        // used to find or create Tourist row

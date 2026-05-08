@@ -7,10 +7,10 @@
 
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { PrismaService } from 'src/database/prisma.service';
 import { QrService } from './qr.service';
 import { FloorInput, GenerateHotelQrResult } from './hotel-qr.types';
 import { buildWaMeDeeplink } from './room-number.util';
+import { PrismaService } from '../database/prisma.service';
 
 @Injectable()
 export class HotelQrService {

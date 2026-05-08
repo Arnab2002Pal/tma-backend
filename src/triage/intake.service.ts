@@ -1,5 +1,6 @@
+// IntakeService.ts
 import { Injectable } from '@nestjs/common';
-import { WhatsappSendService } from 'src/whatsapp/whatsapp-send.service';
+import { WhatsappSendService } from '../whatsapp/whatsapp-send.service';
 
 // Button option shape
 interface ButtonOption {

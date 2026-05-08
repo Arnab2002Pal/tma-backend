@@ -5,9 +5,6 @@
 // Libraries:
 //   qrcode   — pure Node, generates QR as PNG buffer or SVG string
 //   pdfkit   — pure Node PDF generation, no browser required
-//
-// Install: npm install qrcode pdfkit
-// Types:   npm install --save-dev @types/qrcode @types/pdfkit
 
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';

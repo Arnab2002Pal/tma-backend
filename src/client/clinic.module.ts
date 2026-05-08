@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { HttpModule } from '@nestjs/axios';
-import { PrismaModule } from 'src/database/prisma.module';
 import { ClinicService } from './clinic.service';
+import { PrismaModule } from '../database/prisma.module';
 
 @Module({
   imports: [

@@ -1,9 +1,11 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { PrismaService } from 'src/database/prisma.service';
-import { RedisService } from 'src/session/redis.service';
+// booking.service.ts
+import { BadRequestException, Injectable, InternalServerErrorException, Logger } from '@nestjs/common';
 import { BookingConfirmation, CreateBookingInput } from './booking.type';
-import { BookingStatus, ConsultationType } from 'src/generated/prisma/enums';
-import { ClinicAvailableHours } from 'src/client/clinic.types';
+import { PrismaService } from '../database/prisma.service';
+import { RedisService } from '../session/redis.service';
+import { BookingStatus, ConsultationType } from '../generated/prisma/enums';
+import { ClinicAvailableHours } from '../client/clinic.types';
+import { Prisma } from '../generated/prisma/client';
 
 // IST offset in hours — hardcoded, all operations in India
 const IST_OFFSET_HOURS = 5.5;
@@ -22,6 +24,7 @@ const COUNTER_TTL_SECONDS = 48 * 60 * 60;
 @Injectable()
 export class BookingService {
     private readonly logger = new Logger(BookingService.name);
+    private readonly MAX_RETRY_ATTEMPTS = 5;
 
     constructor(
         private readonly prisma: PrismaService,
@@ -42,103 +45,224 @@ export class BookingService {
             language,
         } = input;
 
-        // 1 — Find or create tourist
-        const tourist = await this.upsertTourist(touristPhone, language);
-
-        // 2 — Generate unique MED-XXXX code
-        // hotelId is always required in Phase 1 — all tourists enter via hotel QR
+        // Phase 1 architecture requires hotel context
         if (!hotelId) {
-            throw new Error('hotelId is required for booking in Phase 1. Tourist must enter via hotel QR.');
+            throw new BadRequestException('hotelId is required for Phase 1.');
         }
-        const bookingCode = await this.generateBookingCode(hotelId);
 
-        // 3 — Compute soft visit window from clinic hours
-        const visitWindow = this.computeVisitWindow(
-            clinic.id,
-            await this.getClinicHours(clinic.id),
-        );
+        try {
+            /**
+             * ---------------------------------------------------------------------
+             * Step 1: Prepare booking-related metadata
+             * ---------------------------------------------------------------------
+             *
+             * These operations are independent from the DB insert itself.
+             * Compute everything first before entering the atomic write section.
+             */
 
-        // 4 — Booking expiry — 24hrs from now
-        const expiresAt = new Date(Date.now() + BOOKING_EXPIRY_HOURS * 60 * 60 * 1000);
+            // Create/update tourist profile
+            const tourist = await this.upsertTourist(touristPhone, language);
 
-        // 5 — Create booking row
-        const booking = await this.prisma.booking.create({
-            data: {
-                bookingCode,
-                touristId: tourist.id,
-                clinicId: clinic.id,
-                hotelId: hotelId ?? null,
-                roomNumber: roomNumber ?? null,
-                bookingDate: new Date(),
-                careLayer: triageResult.care_layer,
-                severity: triageResult.severity,
-                symptomText,
-                triageResult: JSON.parse(JSON.stringify(triageResult)),
-                specialityNeeded: triageResult.speciality_needed,
-                consultationType,
-                status: BookingStatus.PENDING_PAYMENT,
-                visitWindow,
-                expiresAt,
-                clinicConfirmed: false,
-            },
-        });
+            // Fetch clinic operating hours
+            const clinicHours = await this.getClinicHours(clinic.id);
 
-        this.logger.log(
-            `[Booking] Created ${bookingCode} for tourist ${tourist.id} at clinic ${clinic.id}`,
-        );
+            // Calculate estimated visit window based on clinic rules
+            const visitWindow = this.computeVisitWindow(clinic.id, clinicHours);
 
-        return {
-            bookingCode,
-            displayName: clinic.displayName,
-            visitWindow,
-            feeOpd: clinic.feeOpd,
-            bookingId: booking.id,
-            touristId: tourist.id,
-        };
+            // Booking expiration timestamp
+            const expiresAt = new Date(
+                Date.now() + BOOKING_EXPIRY_HOURS * 60 * 60 * 1000,
+            );
+
+            /**
+             * ---------------------------------------------------------------------
+             * Step 2: Atomic booking creation loop
+             * ---------------------------------------------------------------------
+             *
+             * Booking code generation is distributed via Redis counters.
+             *
+             * Although Redis INCR is atomic, collisions are still theoretically
+             * possible because:
+             * - different hotel counters may generate same visible code
+             * - Redis reset/recovery scenarios
+             * - historical/manual DB inserts
+             *
+             * Therefore:
+             * - database UNIQUE constraint is treated as the final source of truth
+             * - collisions are resolved by retrying booking creation
+             *
+             * This pattern is fully concurrency-safe.
+             */
+
+            let attempts = 0;
+
+            while (attempts < this.MAX_RETRY_ATTEMPTS) {
+                try {
+                    /**
+                     * Generate short tourist-facing booking code.
+                     *
+                     * Example:
+                     * MED-0001
+                     * MED-00AF
+                     */
+                    const bookingCode = await this.generateCodeAtomic(hotelId);
+
+                    /**
+                     * Atomic DB insert.
+                     *
+                     * Prisma + database UNIQUE constraint guarantees:
+                     * - either insert succeeds fully
+                     * - or fails fully with P2002
+                     *
+                     * This prevents race conditions under concurrent requests.
+                     */
+                    const booking = await this.prisma.booking.create({
+                        data: {
+                            bookingCode,
+                            touristId: tourist.id,
+                            clinicId: clinic.id,
+                            hotelId,
+                            roomNumber: roomNumber ?? null,
+                            bookingDate: new Date(),
+                            careLayer: triageResult.care_layer,
+                            severity: triageResult.severity,
+                            symptomText,
+                            // Store full AI triage payload for audit/history
+                            triageResult: JSON.parse(JSON.stringify(triageResult)),
+                            specialityNeeded: triageResult.speciality_needed,
+                            consultationType,
+                            status: BookingStatus.PENDING_PAYMENT,
+                            visitWindow,
+                            expiresAt,
+                            clinicConfirmed: false,
+                        },
+                    });
+
+                    this.logger.log(
+                        `[Booking] Success: ${bookingCode} (Attempt ${attempts + 1})`,
+                    );
+
+                    return {
+                        bookingCode,
+                        displayName: clinic.displayName,
+                        visitWindow,
+                        feeOpd: clinic.feeOpd,
+                        bookingId: booking.id,
+                        touristId: tourist.id,
+                    };
+
+                } catch (error: any) {
+                    /**
+                     * Handle UNIQUE constraint collision.
+                     *
+                     * Prisma P2002 = duplicate unique field.
+                     *
+                     * If bookingCode already exists:
+                     * - generate a new Redis counter
+                     * - retry insert
+                     *
+                     * Extremely rare under normal conditions.
+                     */
+                    if (
+                        error instanceof Prisma.PrismaClientKnownRequestError &&
+                        error.code === 'P2002'
+                    ) {
+                        const target = (error.meta?.target as string[]) || [];
+
+                        if (target.includes('bookingCode')) {
+                            attempts++;
+
+                            this.logger.warn(
+                                `[Booking] Collision on bookingCode. Retry ${attempts}/${this.MAX_RETRY_ATTEMPTS}`,
+                            );
+
+                            continue;
+                        }
+                    }
+
+                    // Any non-collision DB error should immediately bubble up
+                    throw error;
+                }
+            }
+
+            /**
+             * If we exhausted all retries:
+             * - Redis may be corrupted/reset
+             * - booking code strategy may be flawed
+             * - system may be under abnormal load
+             */
+            throw new InternalServerErrorException(
+                '[Booking] Failed to generate a unique booking code after multiple attempts.',
+            );
+
+        } catch (error: any) {
+            this.logger.error(
+                `[Booking] Failed to create booking: ${error.message}`,
+                error.stack,
+            );
+
+            // Preserve known application exceptions
+            if (
+                error instanceof BadRequestException ||
+                error instanceof InternalServerErrorException
+            ) {
+                throw error;
+            }
+
+            // Prevent leaking internal errors to client
+            throw new InternalServerErrorException(
+                '[Booking] An unexpected error occurred during booking.',
+            );
+        }
     }
 
-    // ─── MED-XXXX generation ─────────────────────────────────────────────────────
-
     /**
-     * Generates a unique MED-XXXX booking code.
+     * Generates a short tourist-facing booking code using Redis atomic counters.
      *
-     * Strategy: sequential counter per hotel per day stored in Redis.
-     * Counter → base-36 encoded → zero-padded to 4 chars → prefixed MED-
+     * Strategy:
+     * - One counter per hotel per day
+     * - Redis INCR guarantees atomic increment across concurrent requests
+     * - Counter is encoded into compact base-36 format
      *
-     * e.g. counter=1 → "0001" → "MED-0001"
-     *      counter=100 → "002S" (base-36) → "MED-002S"
+     * Example:
+     * counter=1   -> MED-0001
+     * counter=35  -> MED-000Z
+     * counter=36  -> MED-0010
+     * counter=100 -> MED-002S
      *
-     * Zero collision: same hotel+day always increments the same counter.
-     * Different hotel or different day = different counter key.
-     * Tourist-facing: short, verbal-friendly, no hotel/room info embedded.
+     * IMPORTANT:
+     * This method does NOT guarantee global uniqueness by itself.
+     *
+     * Final uniqueness protection is enforced by:
+     * - database UNIQUE constraint
+     * - retry-on-collision logic in createBooking()
      */
-    private async generateBookingCode(hotelId: string): Promise<string> {
-        const dateStr = this.getISTDateString(); // YYYYMMDD
+    private async generateCodeAtomic(hotelId: string): Promise<string> {
+        const dateStr = this.getISTDateString();
+
+        // Redis key scoped per hotel + day
         const counterKey = COUNTER_KEY(hotelId, dateStr);
 
-        // Atomic increment in Redis — thread-safe, no race condition
-        const counter = await this.redisService.incrementCounter(counterKey, COUNTER_TTL_SECONDS);
+        /**
+         * Atomic distributed increment.
+         *
+         * Redis guarantees:
+         * - no duplicate counter values
+         * - thread-safe under concurrency
+         * - monotonic increments
+         */
+        const counter = await this.redisService.incrementCounter(
+            counterKey,
+            COUNTER_TTL_SECONDS,
+        );
 
-        // Encode as base-36 (0-9, A-Z), zero-padded to 4 chars
-        const encoded = counter.toString(36).toUpperCase().padStart(4, '0');
+        // Compact human-friendly encoding
+        const encoded = counter
+            .toString(36)
+            .toUpperCase()
+            .padStart(4, '0');
 
-        const code = `MED-${encoded}`;
-
-        // Verify uniqueness in DB — extremely rare collision (different hotels,
-        // same counter value, same day) but handled defensively
-        const existing = await this.prisma.booking.findUnique({
-            where: { bookingCode: code },
-        });
-
-        if (existing) {
-            // Increment once more and retry — statistically will never happen twice
-            this.logger.warn(`[Booking] Code collision on ${code} — retrying`);
-            const retry = await this.redisService.incrementCounter(counterKey, COUNTER_TTL_SECONDS);
-            const retryEncoded = retry.toString(36).toUpperCase().padStart(4, '0');
-            return `MED-${retryEncoded}`;
-        }
-
-        return code;
+        return `MED-${encoded}`;
     }
 
     // ─── Visit window ─────────────────────────────────────────────────────────────

@@ -58,3 +58,7 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
 # database
 src/generated
+
+# gcp json
+gcp-service-account.json
+ai_costs.txt

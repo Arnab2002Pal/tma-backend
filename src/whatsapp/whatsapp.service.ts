@@ -1,29 +1,77 @@
+// Whatsapp.service.ts
 import { HttpService } from '@nestjs/axios';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { firstValueFrom } from 'rxjs';
-import { AiService } from 'src/triage/ai.service';
-import { TriageService } from 'src/triage/triage.service';
-import { IntakeService } from 'src/triage/intake.service';
-import { BookingService } from 'src/booking/booking.service';
-import { WhatsappSendService } from './whatsapp-send.service';
-import { RedisService } from 'src/session/redis.service';
-import { TriageResult, WaSession } from 'src/types/session.types';
-import { ClinicService } from 'src/client/clinic.service';
-import { PrismaService } from 'src/database/prisma.service';
-import { RankedClinic } from 'src/client/clinic.types';
+
 import { WhatsappQrHandler } from './whatsapp-qr.handler';
+import { AiService } from '../triage/ai.service';
+import { TriageService } from '../triage/triage.service';
+import { IntakeService } from '../triage/intake.service';
+import { ClinicService } from '../client/clinic.service';
+import { BookingService } from '../booking/booking.service';
+import { RedisService } from '../session/redis.service';
+import { WhatsappSendService } from './whatsapp-send.service';
+import { TriageResult, WaSession } from '../types/session.types';
+import { RankedClinic } from '../client/clinic.types';
+import { PrismaService } from '../database/prisma.service';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const ESCALATION_FOOTER_EN =
-    '\n\n⚠️ *If symptoms worsen, you develop fever, difficulty breathing, or severe pain — reply DOCTOR and I\'ll connect you to a verified clinic immediately.*';
+    '\n\n⚠️ *If symptoms worsen, you develop fever, difficulty breathing, or severe pain.*';
 
 const AFTER_HOURS_ESCALATION_FOOTER =
-    '\n\n⚠️ *If symptoms become serious, call 112 immediately. Clinics open at 8am — reply DOCTOR then to book.*';
+    '\n\n⚠️ *If symptoms become serious, call 112 immediately. Clinics open at 8am.*';
+
+// TODO: Use it when we have proper doctor booking flow in place, currently it leads to dead end and confusion for tourists. We can re-enable it later when we have the flow ready.
+// const ESCALATION_FOOTER_EN =
+//     '\n\n⚠️ *If symptoms worsen, you develop fever, difficulty breathing, or severe pain — reply DOCTOR and I\'ll connect you to a verified clinic immediately.*';
+
+// const AFTER_HOURS_ESCALATION_FOOTER =
+//     '\n\n⚠️ *If symptoms become serious, call 112 immediately. Clinics open at 8am — reply DOCTOR then to book.*';
 
 // After-hours session TTL — 2.5 hours in seconds
 const AFTER_HOURS_SESSION_TTL = 2.5 * 60 * 60;
+
+// ─── Irrelevant input strike system ──────────────────────────────────────────
+// Tracks how many times a tourist sent something that doesn't look like a
+// symptom description. Progressive: warn → firm warn → 30min cooldown.
+//
+// Redis keys:
+//   irrelevant_strikes:{phone}   — strike counter, TTL 30min (resets after cooldown)
+//   irrelevant_cooldown:{phone}  — exists only during cooldown, TTL 30min
+//
+// Strike thresholds:
+//   1 strike  → friendly nudge
+//   2 strikes → firm warning, last chance
+//   3 strikes → 30min cooldown
+const STRIKE_KEY = (phone: string) => `irrelevant_strikes:${phone}`;
+const COOLDOWN_KEY = (phone: string) => `irrelevant_cooldown:${phone}`;
+const COOLDOWN_TTL_SECONDS = 30 * 60;   // 30 minutes
+const MAX_STRIKES = 3;
+
+// ─── What counts as irrelevant ────────────────────────────────────────────────
+// Short single-word inputs or common filler phrases that are clearly not symptoms.
+// Emojis-only, greetings, test messages, random words.
+// We do NOT flag anything with 3+ words — benefit of the doubt, could be a symptom.
+const IRRELEVANT_PATTERNS = [
+    /^(hi|hello|hey|hii|helo|yo|ok|okay|k|sure|test|testing|123|abc|lol|haha|👋|😊|🙏|✌️|😄)$/i,
+    /^__(gibberish|non_medical)__$/, // internal sentinels — always match
+];
+
+function looksIrrelevant(text: string): boolean {
+    const trimmed = text.trim();
+    // Internal sentinels (__non_medical__, __gibberish__) — always strike, skip all guards
+    if (trimmed.startsWith('__') && trimmed.endsWith('__')) {
+        return IRRELEVANT_PATTERNS.some(p => p.test(trimmed));
+    }
+    // Single word or very short input (under 5 chars) with no medical context
+    if (trimmed.split(/\s+/).length === 1 && trimmed.length <= 5) {
+        return IRRELEVANT_PATTERNS.some(p => p.test(trimmed));
+    }
+    return false;
+}
 
 @Injectable()
 export class WhatsappService {
@@ -84,95 +132,254 @@ export class WhatsappService {
                 return; // statuses, reactions — ignore silently
             }
 
-        } catch (error) {
-            this.logger.error(`[WhatsApp] processMessage error for ${from}:`, error);
+        } catch (error: any) {
+            await this.handleProcessError(from, error);
+        }
+    }
+
+    // ─── Centralised error handler ────────────────────────────────────────────
+    // Separates Meta API errors from generic errors.
+    // Error #131030 = recipient not in sandbox allowlist — dev-only, not a code bug.
+    // Logged clearly so it doesn't look like a real production issue.
+    private async handleProcessError(from: string, error: any): Promise<void> {
+        const metaCode: number | undefined = error?.response?.data?.error?.code;
+        const metaMessage: string = error?.response?.data?.error?.message ?? '';
+        const errorDetails: string = error?.response?.data?.error?.error_data?.details ?? '';
+
+        if (metaCode === 131030) {
+            // Sandbox-only restriction — recipient number not added to Meta test allowlist.
+            // Fix: developers.facebook.com → WhatsApp → API Setup → add recipient number.
+            // This is NOT a code bug. Suppressed from generic error flow.
+            this.logger.warn(
+                `[WhatsApp] #131030 — Recipient ${from} not in Meta sandbox allowlist. ` +
+                `Add this number at: developers.facebook.com → WhatsApp → API Setup → Recipients. ` +
+                `This error disappears on production WABA.`
+            );
+            return; // do NOT attempt to send error message — it will also fail with 131030
+        }
+
+        // All other errors — log and notify tourist
+        this.logger.error(
+            `[WhatsApp] processMessage error for ${from}: ${metaMessage || error.message}`,
+            errorDetails,
+        );
+
+        try {
             await this.whatsappSend.sendTextMessage(
                 from,
-                'Sorry, something went wrong. Please try again or call 112 if this is an emergency.',
+                'Sorry, we encountered a technical issue. Please try again. If this is a medical emergency, please call 112 immediately.',
+            );
+        } catch (sendError: any) {
+            this.logger.warn(`[WhatsApp] Failed to send error notification to ${from}`);
+        }
+    }
+
+    // ─── Strike system ────────────────────────────────────────────────────────
+    // Returns true if the tourist is in cooldown (caller should stop processing).
+    // Returns false if the message should proceed normally.
+    // Increments strike counter on irrelevant input.
+    private async checkAndStrikeIrrelevant(from: string, text: string): Promise<boolean> {
+        // Check if already in cooldown
+        this.logger.log(`[WhatsApp] Checking irrelevant input for ${from}: "${text}"`); 
+        const cooldownRaw = await this.sessionService.get(COOLDOWN_KEY(from));
+        if (cooldownRaw) {
+            const unlocksAt = new Date(parseInt(cooldownRaw, 10));
+            const minutesLeft = Math.ceil((unlocksAt.getTime() - Date.now()) / 60000);
+            this.logger.warn(`[WhatsApp] ${from} is in irrelevant-input cooldown for ${minutesLeft}min more`);
+
+            await this.whatsappSend.sendTextMessage(
+                from,
+                `⏳ You've been temporarily restricted due to repeated unrelated messages.\n\n` +
+                `Please try again in *${minutesLeft} minute${minutesLeft === 1 ? '' : 's'}*.\n\n` +
+                `If you have a genuine medical concern, call *112* now.`,
+            );
+            return true; // blocked
+        }
+
+        if (!looksIrrelevant(text)) {
+            return false; // message looks genuine — no strike
+        }
+
+        // Irrelevant input — increment strike
+        const strikeKey = STRIKE_KEY(from);
+        const currentRaw = await this.sessionService.get(strikeKey);
+        const current = currentRaw ? parseInt(currentRaw, 10) : 0;
+        const strikes = current + 1;
+
+        this.logger.warn(`[WhatsApp] Irrelevant input from ${from} — strike ${strikes}/${MAX_STRIKES}: "${text}"`);
+
+        if (strikes >= MAX_STRIKES) {
+            // Strike 3 — apply 30min cooldown, clear strike counter
+            const unlocksAt = Date.now() + COOLDOWN_TTL_SECONDS * 1000;
+            await this.sessionService.set(COOLDOWN_KEY(from), String(unlocksAt), COOLDOWN_TTL_SECONDS);
+            await this.sessionService.del(strikeKey);
+
+            this.logger.warn(`[WhatsApp] ${from} hit max strikes — 30min cooldown applied`);
+
+            await this.whatsappSend.sendTextMessage(
+                from,
+                `🚫 *Access temporarily restricted.*\n\n` +
+                `You've sent several messages that don't appear to be symptom descriptions. ` +
+                `This platform is for tourists who need medical help.\n\n` +
+                `Please try again in *30 minutes*.\n\n` +
+                `⚠️ If you have a *real medical emergency*, call *112* immediately.`,
+            );
+            return true; // blocked
+        }
+
+        // Save updated strike count — TTL matches cooldown window so it auto-resets
+        await this.sessionService.set(strikeKey, String(strikes), COOLDOWN_TTL_SECONDS);
+
+        if (strikes === 1) {
+            await this.whatsappSend.sendTextMessage(
+                from,
+                `👋 It looks like your message might not be a symptom description.\n\n` +
+                `TMA helps tourists with medical symptoms. To get started, please describe what you're feeling.\n\n` +
+                `_Example: "I have a headache and fever since morning" or "my stomach has been hurting for 2 days"_`,
+            );
+        } else if (strikes === 2) {
+            await this.whatsappSend.sendTextMessage(
+                from,
+                `⚠️ *Last warning* — please describe your symptoms to continue.\n\n` +
+                `_Example: "I have a fever and body ache since yesterday"_\n\n` +
+                `Continued unrelated messages will temporarily restrict your access.`,
             );
         }
+
+        return true; // irrelevant — don't process further
     }
 
     // ─── Audio handler ────────────────────────────────────────────────────────
-
     private async handleAudioMessage(
-        from: string,
-        message: any,
-        session: WaSession,
-    ): Promise<void> {
-        const mediaUrl = await this.getMediaUrl(message.audio.id);
-        const audioBuffer = await this.downloadMedia(mediaUrl);
+            from: string,
+            message: any,
+            session: WaSession,
+        ): Promise<void> {
 
-        const { text, language } = await this.aiService.transcribe(audioBuffer, 'voice.ogg');
+            // Cooldown check — even audio messages count
+            const cooldownRaw = await this.sessionService.get(COOLDOWN_KEY(from));
+            if (cooldownRaw) {
+                const minutesLeft = Math.ceil((parseInt(cooldownRaw, 10) - Date.now()) / 60000);
+                await this.whatsappSend.sendTextMessage(
+                    from,
+                    `⏳ You've been temporarily restricted. Please try again in *${minutesLeft} minute${minutesLeft === 1 ? '' : 's'}*.\n\nFor emergencies, call *112*.`,
+                );
+                return;
+            }
 
-        if (!text || this.aiService.isLikelyGibberish(text)) {
-            await this.whatsappSend.sendTextMessage(
+            const mediaUrl = await this.getMediaUrl(message.audio.id);
+            const audioBuffer = await this.downloadMedia(mediaUrl);
+
+            const { text, language } = await this.aiService.transcribe(audioBuffer, 'voice.ogg');
+
+            // Gibberish or empty audio — strike system applies here too
+            if (!text || this.aiService.isLikelyGibberish(text)) {
+                this.logger.warn(`[WhatsApp] Gibberish or empty audio from ${from} — text="${text}"`);
+
+                const blocked = await this.checkAndStrikeIrrelevant(from, text || '__gibberish__');
+                if (!blocked) {
+                    await this.whatsappSend.sendTextMessage(
+                        from,
+                        'Sorry, I had trouble understanding your voice message clearly.\n\n' +
+                        'Please *type* your symptoms and I\'ll help you right away.',
+                    );
+                }
+                return;
+            }
+
+            this.logger.log(`[WhatsApp] Whisper/Google STT → "${text}" (language: ${language})`);
+
+            // ── Circuit breaker gate — before any AI call ────────────────────────────
+            // If Anthropic is down, skip medical relevance check entirely.
+            // Treat transcribed audio as medical (safe default) and go straight to confirmation.
+            // isMedicalSymptom() defaults to true on failure anyway — this just avoids
+            // recording another failure against the circuit breaker counter.
+            if (this.aiService.isCircuitOpen()) {
+                this.logger.warn(`[WhatsApp] Circuit open — skipping isMedicalSymptom for audio from ${from}`);
+                session.detectedLanguage = language;
+                session.symptomText = text;
+                session.step = 'AWAITING_SYMPTOM_CONFIRM';
+                await this.sessionService.saveSession(session);
+                await this.whatsappSend.sendButtonMessage(
+                    from,
+                    `🎙️ I understood:\n_"${text}"_\n\nIs this correct?`,
+                    [
+                        { id: 'confirm_yes', title: 'Yes, correct' },
+                        { id: 'confirm_no', title: 'No, let me retype' },
+                    ],
+                );
+                return;
+            }
+
+            // ── Medical relevance check — after transcription, before confirmation ──
+            // Catches non-medical audio ("what's the weather", "hello test") that
+            // passed gibberish check but isn't a symptom description.
+            // isMedicalSymptom() defaults to true on AI failure — never blocks genuine tourists.
+            const isMedical = await this.aiService.isMedicalSymptom(text);
+            if (!isMedical) {
+                this.logger.warn(`[WhatsApp] Non-medical audio detected from ${from} — transcript="${text.substring(0, 80)}"`);
+                await this.checkAndStrikeIrrelevant(from, '__non_medical__');
+                return;
+            }
+
+            session.detectedLanguage = language;
+            session.symptomText = text;
+            session.step = 'AWAITING_SYMPTOM_CONFIRM';
+            await this.sessionService.saveSession(session);
+
+            await this.whatsappSend.sendButtonMessage(
                 from,
-                'Sorry, I had trouble understanding your voice message clearly.\n\n' +
-                'Please *type* your symptoms and I\'ll help you right away.',
+                `🎙️ I understood:\n_"${text}"_\n\nIs this correct?`,
+                [
+                    { id: 'confirm_yes', title: 'Yes, correct' },
+                    { id: 'confirm_no', title: 'No, let me retype' },
+                ],
             );
-            return;
         }
 
-        this.logger.log(`[WhatsApp] Whisper → "${text}" (language: ${language})`);
-
-        session.detectedLanguage = language;
-        session.symptomText = text;
-        session.step = 'AWAITING_SYMPTOM_CONFIRM';
-        await this.sessionService.saveSession(session);
-
-        await this.whatsappSend.sendButtonMessage(
-            from,
-            `🎙️ I understood:\n_"${text}"_\n\nIs this correct?`,
-            [
-                { id: 'confirm_yes', title: 'Yes, correct' },
-                { id: 'confirm_no', title: 'No, let me retype' },
-            ],
-        );
-    }
-
     // ─── Text message handler ─────────────────────────────────────────────────
-
     private async handleTextMessage(
         from: string,
         text: string,
         session: WaSession,
     ) {
-
         // ── QR prefill message — runs before everything else ────────────────────
-        // Tourist just scanned hotel room QR.
-        // Message contains: "I need medical help. Room 303 · Taj Bengal · TMA-{hotelId}-{roomNumber}"
         if (this.qrHandler.isStartMessage(text)) {
             await this.qrHandler.handleStart(from, text, session);
             return;
         }
 
-        // ── No hotel context — tourist reached us without scanning QR ───────────
-        // Covers: found number directly, edited/deleted the prefill before sending,
-        // sent something else entirely instead of the prefilled message.
-        // Exception: session.step !== 'IDLE' means they are mid-conversation (already
-        // scanned previously and are continuing) — let them through.
-        console.log('Session at text handler:', session);
+        // ── No hotel context ────────────────────────────────────────────────────
         if (!session.hotelId) {
             await this.qrHandler.sendScanQrMessage(from);
             return;
         }
 
-        // ── Tourist is mid-conversation (has hotelId, step is not IDLE) ──────────
-        // They sent a free-text message during an active session.
-        // Route normally below.
+        // ── Cooldown gate — checked before everything else ───────────────────────
+        const cooldownRawText = await this.sessionService.get(COOLDOWN_KEY(from));
+        if (cooldownRawText) {
+            const minutesLeft = Math.ceil((parseInt(cooldownRawText, 10) - Date.now()) / 60000);
+            this.logger.warn(`[WhatsApp] ${from} in cooldown — blocking text message, ${minutesLeft}min remaining`);
+            await this.whatsappSend.sendTextMessage(
+                from,
+                `⏳ You've been temporarily restricted due to repeated unrelated messages.\n\n` +
+                `Please try again in *${minutesLeft} minute${minutesLeft === 1 ? '' : 's'}*.\n\n` +
+                `If you have a genuine medical concern, call *112* now.`,
+            );
+            return;
+        }
 
-        // DOCTOR keyword
+        // ── DOCTOR keyword — bypass strike system entirely ──────────────────────
+        // A tourist saying DOCTOR mid-conversation is always genuine intent.
         if (text.toLowerCase() === 'doctor') {
             await this.handleDoctorKeyword(from, session);
             return;
         }
 
-        // Q5 number reply — intercept before emergency check
+        // ── Q5 number reply — bypass strike system (valid structured input) ─────
         if (session.step === 'AWAITING_Q5') {
             const trimmed = text.trim();
             const parsed = this.intakeService.parseQ5Answer(trimmed);
-
             if (!parsed) {
                 await this.whatsappSend.sendTextMessage(
                     from,
@@ -181,7 +388,6 @@ export class WhatsappService {
                 );
                 return;
             }
-
             session.intakeAnswers.q5 = parsed;
             session.step = 'AWAITING_TRIAGE';
             await this.sessionService.saveSession(session);
@@ -189,7 +395,7 @@ export class WhatsappService {
             return;
         }
 
-        // AWAITING_EMERGENCY_CONFIRM — YES/NO
+        // ── YES/NO during emergency confirm — bypass strike system ──────────────
         if (session.step === 'AWAITING_EMERGENCY_CONFIRM') {
             const upper = text.toUpperCase().trim();
             if (upper === 'YES') {
@@ -208,15 +414,21 @@ export class WhatsappService {
             return;
         }
 
-        // Fresh symptom text — run emergency check then intake
+        // ── Strike system — only for free-text symptom entry ────────────────────
+        // Only runs when session is at IDLE (fresh symptom entry).
+        // Mid-conversation states (Q1–Q4, AWAITING_PAYMENT, etc.) are bypassed above.
+        if (session.step === 'IDLE' || !session.step) {
+            const blocked = await this.checkAndStrikeIrrelevant(from, text);
+            if (blocked) return;
+        }
+
+        // ── Fresh symptom text — run emergency check then intake ─────────────────
         await this.runEmergencyCheckAndIntake(from, text, session);
     }
 
     // ─── DOCTOR keyword handler ───────────────────────────────────────────────
-
     private async handleDoctorKeyword(from: string, session: WaSession): Promise<void> {
         if (this.clinicService.isAfterHours()) {
-            // After hours — no clinic matching, give clear guidance
             await this.whatsappSend.sendTextMessage(
                 from,
                 '🏥 Clinics are currently closed.\n\n' +
@@ -235,7 +447,6 @@ export class WhatsappService {
     }
 
     // ─── Button reply handler ─────────────────────────────────────────────────
-
     private async handleButtonReply(
         from: string,
         buttonId: string,
@@ -287,6 +498,14 @@ export class WhatsappService {
                 await this.intakeService.sendQ5(from);
                 break;
 
+            case 'AWAITING_PAYMENT':
+            case 'CLINIC_SELECTION':
+                await this.whatsappSend.sendTextMessage(
+                    from,
+                    'Your booking is being processed. Please wait while I connect you to a verified clinic.',
+                );
+                break;
+
             default:
                 this.logger.warn(`[WhatsApp] Button reply in unexpected state: ${session.step}`);
                 await this.whatsappSend.sendTextMessage(
@@ -299,7 +518,6 @@ export class WhatsappService {
     }
 
     // ─── List reply handler (clinic selection) ────────────────────────────────
-
     private async handleListReply(
         from: string,
         listId: string,
@@ -355,7 +573,7 @@ export class WhatsappService {
                 clinic: selectedClinic,
                 triageResult: session.triageResult!,
                 symptomText: session.symptomText,
-                hotelId: session.hotelId,   // narrowed to string by guard above
+                hotelId: session.hotelId,
                 roomNumber: session.roomNumber,
                 language: session.detectedLanguage,
             });
@@ -378,12 +596,52 @@ export class WhatsappService {
     }
 
     // ─── Emergency check + intake ─────────────────────────────────────────────
-
     private async runEmergencyCheckAndIntake(
         from: string,
         text: string,
         session: WaSession,
     ): Promise<void> {
+        // ── Medical relevance check — covers typed text (audio has its own check) ──
+        // Pattern-based looksIrrelevant() catches obvious filler ("hi", "ok").
+        // isMedicalSymptom() catches longer but still off-topic text ("what's the weather today").
+        // Both run at IDLE entry — mid-conversation steps are already routed before this.
+        // Pattern check first (free) — AI check second (costs a Haiku call)
+        if (looksIrrelevant(text)) {
+            this.logger.warn(`[WhatsApp] Pattern-matched irrelevant text from ${from} — skipping AI check`);
+            await this.checkAndStrikeIrrelevant(from, '__non_medical__');
+            return;
+        }
+
+        // ── Circuit breaker gate ─────────────────────────────────────────────────
+        // If AI is down entirely, skip triage and go straight to L3 clinic booking.
+        if (this.aiService.isCircuitOpen()) {
+            this.logger.warn(`[WhatsApp] Circuit open — skipping triage for ${from}, routing direct to L3`);
+            await this.whatsappSend.sendTextMessage(
+                from,
+                '⚠️ Our assessment system is temporarily unavailable.\n\nLet me connect you to a verified clinic directly.',
+            );
+            session.symptomText = text;
+            session.intakeAnswers = {};
+            session.triageResult = {
+                severity: 'moderate',
+                care_layer: 3,
+                summary: 'AI unavailable — routed to clinic directly',
+                speciality_needed: 'general physician',
+                ai_guidance: '',
+                emergency_flag: false,
+            };
+            await this.sessionService.saveSession(session);
+            await this.handleLayer3(from, session, session.triageResult);
+            return;
+        }
+
+        const isMedical = await this.aiService.isMedicalSymptom(text);
+        if (!isMedical) {
+            this.logger.warn(`[WhatsApp] Non-medical text from ${from} — input="${text.substring(0, 80)}"`);
+            await this.checkAndStrikeIrrelevant(from, '__non_medical__');
+            return;
+        }
+
         const emergencyResult = await this.triageService.checkEmergency(text);
         this.logger.log('[WhatsApp] Emergency check:', emergencyResult);
 
@@ -415,16 +673,45 @@ export class WhatsappService {
     }
 
     // ─── Final triage after Q5 ────────────────────────────────────────────────
-
     private async runFinalTriage(from: string, session: WaSession): Promise<void> {
         await this.whatsappSend.sendTextMessage(from, '🔍 Analysing your symptoms...');
+
+        // ── Circuit breaker gate ─────────────────────────────────────────────────
+        if (this.aiService.isCircuitOpen()) {
+            this.logger.warn(`[WhatsApp] Circuit open — skipping enriched triage for ${from}`);
+            await this.whatsappSend.sendTextMessage(
+                from,
+                '⚠️ Our assessment system is temporarily unavailable.\n\nFinding you a verified clinic directly.',
+            );
+            const fallbackResult: TriageResult = {
+                severity: 'moderate',
+                care_layer: 3,
+                summary: 'AI unavailable — routed to clinic directly',
+                speciality_needed: 'general physician',
+                ai_guidance: '',
+                emergency_flag: false,
+            };
+            session.triageResult = fallbackResult;
+            await this.sessionService.saveSession(session);
+            await this.handleLayer3(from, session, fallbackResult);
+            return;
+        }
 
         const result = await this.aiService.runEnrichedTriage(
             session.symptomText,
             session.intakeAnswers,
         );
+        
+        if (!session.hotelId) {
+            this.logger.error(`[WhatsApp] hotelId missing at runFinalTriage for ${from} — session corrupted`);
+            await this.whatsappSend.sendTextMessage(
+                from,
+                'Something went wrong with your session.\n\nPlease scan the QR code in your room again to restart.',
+            );
+            await this.sessionService.clearSession(from);
+            return;
+        }
 
-        session.hotelId = session.hotelId || 'cmobeec9c00008oellhwqz6ax'; // ensure hotelId is string for booking layer, even if missing (should not happen in Phase 1)
         session.triageResult = result;
         this.logger.log(`[WhatsApp] Triage result for ${from}:`, result);
 
@@ -458,13 +745,18 @@ export class WhatsappService {
     }
 
     // ─── Layer 1 ──────────────────────────────────────────────────────────────
-
     private async handleLayer1(from: string, session: WaSession): Promise<void> {
-        const guidance = await this.aiService.getL1Guidance(
-            session.symptomText,
-            session.intakeAnswers,
-            session.detectedLanguage,
-        );
+        let guidance: string;
+        try {
+            guidance = await this.aiService.getL1Guidance(
+                session.symptomText,
+                session.intakeAnswers,
+                session.detectedLanguage,
+            );
+        } catch {
+            this.logger.warn(`[WhatsApp] L1 Guidance failed — using static fallback for ${from}`);
+            guidance = this.aiService.getStaticAfterHoursGuidance(session.symptomText);
+        }
 
         await this.whatsappSend.sendTextMessage(from, guidance + ESCALATION_FOOTER_EN);
         session.step = 'IDLE';
@@ -472,7 +764,6 @@ export class WhatsappService {
     }
 
     // ─── Layer 3 — clinic matching ────────────────────────────────────────────
-
     private async handleLayer3(
         from: string,
         session: WaSession,
@@ -507,7 +798,7 @@ export class WhatsappService {
 
         await this.whatsappSend.sendTextMessage(from, '🔍 Finding verified clinics near you...');
 
-        this.logger.log(`[WhatsApp] Running clinic match for ${from} with speciality "${result.speciality_needed}" in hotel city "${hotel.city}"`);
+        this.logger.log(`[WhatsApp] Running clinic match for ${from} — speciality="${result.speciality_needed}", city="${hotel.city}"`);
 
         const clinics = await this.clinicService.findMatchingClinics({
             city: hotel.city,
@@ -536,7 +827,6 @@ export class WhatsappService {
     }
 
     // ─── After-hours handler ──────────────────────────────────────────────────
-
     private async handleAfterHours(from: string, session: WaSession): Promise<void> {
         this.logger.log(`[WhatsApp] After-hours path triggered for ${from}`);
 
@@ -550,11 +840,18 @@ export class WhatsappService {
         );
 
         // Augmented L1 guidance with hotel staff context
-        const guidance = await this.aiService.getL1GuidanceAfterHours(
-            session.symptomText,
-            session.intakeAnswers,
-            session.detectedLanguage,
-        );
+        // Falls back to static per-symptom guidance if Sonnet is down
+        let guidance: string;
+        try {
+            guidance = await this.aiService.getL1GuidanceAfterHours(
+                session.symptomText,
+                session.intakeAnswers,
+                session.detectedLanguage,
+            );
+        } catch {
+            this.logger.warn(`[WhatsApp] After-hours Sonnet failed — using static fallback for ${from}`);
+            guidance = this.aiService.getStaticAfterHoursGuidance(session.symptomText);
+        }
 
         await this.whatsappSend.sendTextMessage(
             from,
@@ -574,7 +871,6 @@ export class WhatsappService {
     }
 
     // ─── Hotel alert ──────────────────────────────────────────────────────────
-
     private async sendHotelAlert(hotelId: string, roomNumber: string): Promise<void> {
         try {
             const hotel = await this.prisma.hotel.findUnique({
@@ -602,7 +898,6 @@ export class WhatsappService {
     }
 
     // ─── Send clinic list ─────────────────────────────────────────────────────
-
     private async sendClinicListMessage(from: string, clinics: RankedClinic[]): Promise<void> {
         const rows = clinics.map((c, i) => ({
             id: `clinic_${i}`,
@@ -621,7 +916,6 @@ export class WhatsappService {
     }
 
     // ─── Triage summary ───────────────────────────────────────────────────────
-
     private async sendTriageSummary(from: string, result: TriageResult): Promise<void> {
         const layerLabel: Record<number, string> = {
             1: '🟢 Self-care guidance recommended',
@@ -640,8 +934,7 @@ export class WhatsappService {
         await this.whatsappSend.sendTextMessage(from, message);
     }
 
-    // ─── Booking created message (pre-payment placeholder) ───────────────────
-
+    // ─── Booking created message ──────────────────────────────────────────────
     private async sendBookingCreatedMessage(
         from: string,
         confirmation: {
@@ -666,7 +959,6 @@ export class WhatsappService {
     }
 
     // ─── Layer 4 ──────────────────────────────────────────────────────────────
-
     private async sendLayer4Response(to: string): Promise<void> {
         await this.whatsappSend.sendTextMessage(
             to,
@@ -680,7 +972,6 @@ export class WhatsappService {
     }
 
     // ─── Media helpers ────────────────────────────────────────────────────────
-
     async getMediaUrl(mediaId: string): Promise<string> {
         const response = await firstValueFrom(
             this.httpService.get(`https://graph.facebook.com/v21.0/${mediaId}`, {
@@ -701,7 +992,6 @@ export class WhatsappService {
     }
 
     // ─── Formatting helpers ───────────────────────────────────────────────────
-
     private capitalise(str: string): string {
         return str.charAt(0).toUpperCase() + str.slice(1);
     }
