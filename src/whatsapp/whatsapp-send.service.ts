@@ -1,3 +1,5 @@
+// whatsapp-send.service.ts
+
 import { HttpService } from '@nestjs/axios';
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -31,7 +33,12 @@ export class WhatsappSendService {
                     type: 'text',
                     text: { body },
                 },
-                { headers: { Authorization: `Bearer ${this.token}` } },
+                {
+                    headers: {
+                        Authorization: `Bearer ${this.token}`,
+                        'Content-Type': 'application/json; charset=utf-8',
+                    }
+                },
             ),
         );
     }
@@ -93,6 +100,25 @@ export class WhatsappSendService {
                 { headers: { Authorization: `Bearer ${this.token}` } },
             ),
         );
+    }
+
+    async markAsRead(messageId: string): Promise<void> {
+        try {
+            await firstValueFrom(
+                this.httpService.post(
+                    `${this.baseUrl}/messages`,
+                    {
+                        messaging_product: 'whatsapp',
+                        status: 'read',
+                        message_id: messageId,
+                    },
+                    { headers: { Authorization: `Bearer ${this.token}` } },
+                ),
+            );
+        } catch (error: any) {
+            // Silently fail for read receipts — they aren't critical
+            console.warn(`Failed to mark message ${messageId} as read:`, error.response?.data || error.message);
+        }
     }
 
     // Truncates to maxLen, appending '…' (single char, U+2026) so the cut is obvious.

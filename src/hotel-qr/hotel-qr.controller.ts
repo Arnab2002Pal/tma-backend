@@ -51,8 +51,6 @@ export class HotelQrController {
                 `[QRScan] token=${token.slice(0, 8)}… room=${roomNumber} → redirect`,
             );
 
-            console.log(`[QRScan] token=${token.slice(0, 8)}… room=${roomNumber} → redirect to ${deeplink}`);
-
             return res.redirect(302, deeplink);
         } catch (err) {
             if (err instanceof NotFoundException) {

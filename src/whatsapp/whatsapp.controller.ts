@@ -1,12 +1,17 @@
+// Whatsapp.controller.ts
 import { Controller, Get, Post, Body, Query, HttpCode, HttpStatus } from '@nestjs/common';
 import { WhatsappService } from './whatsapp.service';
 import { ConfigService } from '@nestjs/config';
+import { WhatsappSendService } from './whatsapp-send.service';
+import { RedisService } from '../session/redis.service';
 
 @Controller('whatsapp')
 export class WhatsappController {
     constructor(
         private readonly whatsappService: WhatsappService,
         private readonly config: ConfigService,
+        private readonly whatsappSend: WhatsappSendService,
+        private readonly sessionService: RedisService,
     ) { }
 
     @Get('webhook')
@@ -25,6 +30,17 @@ export class WhatsappController {
     async handleIncoming(@Body() body: any) {
         const message = body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
         if (!message) return { status: 'ignored' };
+
+        const wamid: string | undefined = message.id;
+        
+        // In handleIncoming(), after extracting message:
+        if (wamid && await this.sessionService.isDuplicate(wamid)) {
+            return { status: 'duplicate' };
+        }
+
+        if (wamid) {
+            this.whatsappSend.markAsRead(wamid).catch(() => {}); // fire-and-forget, already silent
+        }
 
         // Return 200 immediately — process async
         setImmediate(() => this.whatsappService.processMessage(message));

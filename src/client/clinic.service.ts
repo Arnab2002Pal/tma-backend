@@ -2,9 +2,9 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
-import { PrismaService } from 'src/database/prisma.service';
 import { ClinicAvailableHours, ClinicMatchInput, RankedClinic } from './clinic.types';
-import { Clinic } from 'src/generated/prisma/client';
+import { PrismaService } from '../database/prisma.service';
+import { Clinic } from '../generated/prisma/client';
 
 // IST offset in hours
 const IST_OFFSET_HOURS = 5.5;

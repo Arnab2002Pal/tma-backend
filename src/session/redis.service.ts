@@ -1,7 +1,7 @@
 import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
 import Redis from 'ioredis';
 import { REDIS_CLIENT } from './redis.provider';
-import { DEFAULT_SESSION, WaSession } from 'src/types/session.types';
+import { DEFAULT_SESSION, WaSession } from '../types/session.types';
 
 const SESSION_TTL = 86400; // 24 hours
 const SESSION_PREFIX = 'wa_session:';
@@ -14,13 +14,17 @@ export class RedisService implements OnModuleInit {
     private healthCheckTimer: NodeJS.Timeout | null = null;
     private memoryCounters: Map<string, number> = new Map();
 
+    // Generic KV fallback for non-session keys (strikes, cooldowns, etc.)
+    // Only used when Redis is unavailable — keys here never expire automatically.
+    private readonly memoryKv = new Map<string, string>();
+
     constructor(@Inject(REDIS_CLIENT) private readonly redis: Redis) { }
 
     async onModuleInit() {
         await this.checkRedisHealth();
     }
 
-    // ─── Public API ────────────────────────────────────────────
+    // ─── Session API ────────────────────────────────────────────
 
     async getSession(phone: string): Promise<WaSession> {
         if (this.redisAvailable) {
@@ -83,6 +87,63 @@ export class RedisService implements OnModuleInit {
         }
         // Memory fallback — TTL not enforced, session will persist until cleared
         // Acceptable: after-hours L1 is a low-risk path
+    }
+
+    // ─── Generic KV API ─────────────────────────────────────────
+    // Used by strike system, cooldown keys, and any future non-session Redis keys.
+    // Keys are stored as-is (no prefix) — callers are responsible for namespacing.
+    //
+    // get()  → returns string value or null if key doesn't exist
+    // set()  → stores value with optional TTL in seconds
+    // del()  → deletes key (no-op if missing)
+    //
+    // Memory fallback behaviour:
+    //   - get/set/del all work against memoryKv
+    //   - TTL is NOT enforced in memory — keys persist until del() or process restart
+    //   - Acceptable for strike/cooldown: worst case tourist gets an extra warning
+    //     or cooldown persists a bit longer — not a safety issue
+
+    async get(key: string): Promise<string | null> {
+        if (this.redisAvailable) {
+            try {
+                return await this.redis.get(key);
+            } catch (err: any) {
+                console.error(`[Session] Redis get failed for key=${key}:`, err.message);
+                this.markRedisUnavailable();
+            }
+        }
+        return this.memoryKv.get(key) ?? null;
+    }
+
+    async set(key: string, value: string, ttlSeconds?: number): Promise<void> {
+        if (this.redisAvailable) {
+            try {
+                if (ttlSeconds) {
+                    await this.redis.setex(key, ttlSeconds, value);
+                } else {
+                    await this.redis.set(key, value);
+                }
+                return;
+            } catch (err: any) {
+                console.error(`[Session] Redis set failed for key=${key}:`, err.message);
+                this.markRedisUnavailable();
+            }
+        }
+        // Memory fallback — TTL not enforced (acceptable, see above)
+        this.memoryKv.set(key, value);
+    }
+
+    async del(key: string): Promise<void> {
+        if (this.redisAvailable) {
+            try {
+                await this.redis.del(key);
+                return;
+            } catch (err: any) {
+                console.error(`[Session] Redis del failed for key=${key}:`, err.message);
+                this.markRedisUnavailable();
+            }
+        }
+        this.memoryKv.delete(key);
     }
 
     // ─── Dedup ─────────────────────────────────────────────────

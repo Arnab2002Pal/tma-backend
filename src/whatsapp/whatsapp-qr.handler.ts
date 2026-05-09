@@ -18,10 +18,10 @@
 //   readability and independent testability.
 
 import { Injectable, Logger } from '@nestjs/common';
-import { PrismaService } from 'src/database/prisma.service';
-import { RedisService } from 'src/session/redis.service';
 import { WhatsappSendService } from './whatsapp-send.service';
-import { WaSession } from 'src/types/session.types';
+import { PrismaService } from '../database/prisma.service';
+import { RedisService } from '../session/redis.service';
+import { WaSession } from '../types/session.types';
 
 // Matches the TMA-{hotelId}-{roomNumber} suffix at the end of the prefilled message.
 //

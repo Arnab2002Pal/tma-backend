@@ -2,8 +2,7 @@ import { Module } from '@nestjs/common';
 import { TriageService } from './triage.service';
 import { AiService } from './ai.service';
 import { IntakeService } from './intake.service';
-import { WhatsappModule } from 'src/whatsapp/whatsapp.module';
-import { WhatsappSendModule } from 'src/whatsapp/whatsapp-send.module';
+import { WhatsappSendModule } from '../whatsapp/whatsapp-send.module';
 
 @Module({
   imports: [WhatsappSendModule],
