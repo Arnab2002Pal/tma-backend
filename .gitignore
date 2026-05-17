@@ -62,3 +62,6 @@ src/generated
 # gcp json
 gcp-service-account.json
 ai_costs.txt
+
+# tsbuildinfo
+tsconfig.build.tsbuildinfo
