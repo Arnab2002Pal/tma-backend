@@ -1,6 +1,6 @@
 import { defineConfig } from 'prisma/config';
 
-export default defineConfig({
+const config = defineConfig({
   schema: 'prisma/schema.prisma',
   migrations: {
     path: 'prisma/migrations',
@@ -9,3 +9,6 @@ export default defineConfig({
     url: process.env['DATABASE_URL'],
   },
 });
+
+export default config;
+module.exports = config;
