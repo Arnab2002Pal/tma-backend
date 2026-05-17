@@ -146,8 +146,7 @@ jobs:
               "containerOverrides": [{
                 "name": "${{ env.CONTAINER_NAME }}",
                 "environment": [
-                  {"name": "DATABASE_URL", "value": "${{ secrets.DATABASE_URL }}"},
-                  {"name": "DIRECT_URL",   "value": "${{ secrets.DIRECT_URL }}"}
+                  {"name": "DATABASE_URL", "value": "${{ secrets.DATABASE_URL }}"}
                 ]
               }]
             }' \
