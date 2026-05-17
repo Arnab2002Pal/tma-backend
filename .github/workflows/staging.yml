@@ -116,8 +116,7 @@ jobs:
             --overrides '{
               "containerOverrides": [{
                 "name": "${{ env.CONTAINER_NAME }}",
-                "entryPoint": ["sh", "-c"],
-                "command": ["npx prisma migrate deploy"],
+                "command": ["sh", "-c", "npx prisma migrate deploy && exit 0"],
                 "environment": [
                   {"name": "DATABASE_URL", "value": "${{ secrets.DATABASE_URL }}"},
                   {"name": "DIRECT_URL",   "value": "${{ secrets.DIRECT_URL }}"}
