@@ -1,0 +1,167 @@
+name: Deploy to Staging
+
+on:
+  push:
+    branches:
+      - staging
+
+env:
+  AWS_REGION: ap-south-1
+  AWS_ACCOUNT_ID: "339712934190"
+  ECR_REPOSITORY: tma-backend
+  ECS_CLUSTER: tma-cluster
+  ECS_SERVICE: tma-staging
+  ECS_TASK_DEFINITION: tma-staging-task
+  CONTAINER_NAME: tma-app
+
+jobs:
+  deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. AWS credentials ─────────────────────────────────────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ── 3. ECR login ───────────────────────────────────────────────────────
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── 4. Build and push image ────────────────────────────────────────────
+      - name: Build, tag, and push image to ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      # ── 5. Download current task definition ───────────────────────────────
+      - name: Download task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+            --query taskDefinition \
+            > task-definition.json
+
+      # ── 6. Inject secrets into task definition ─────────────────────────────
+      # Overwrites every REPLACE_AT_DEPLOY placeholder with real values from
+      # GitHub Secrets. Non-sensitive vars stay hardcoded from the task def.
+      - name: Inject secrets into task definition
+        run: |
+          jq '
+            .containerDefinitions[0].environment = (
+              .containerDefinitions[0].environment | map(
+                if .name == "DATABASE_URL"                  then . + {"value": $DATABASE_URL}
+                elif .name == "DIRECT_URL"                  then . + {"value": $DIRECT_URL}
+                elif .name == "ANTHROPIC_API_KEY"           then . + {"value": $ANTHROPIC_API_KEY}
+                elif .name == "OPENAI_API_KEY"              then . + {"value": $OPENAI_API_KEY}
+                elif .name == "WHATSAPP_WABA_ID"            then . + {"value": $WHATSAPP_WABA_ID}
+                elif .name == "WHATSAPP_PHONE_NUMBER_ID"    then . + {"value": $WHATSAPP_PHONE_NUMBER_ID}
+                elif .name == "WHATSAPP_PHONE_NUMBER"       then . + {"value": $WHATSAPP_PHONE_NUMBER}
+                elif .name == "WHATSAPP_ACCESS_TOKEN"       then . + {"value": $WHATSAPP_ACCESS_TOKEN}
+                elif .name == "WHATSAPP_WEBHOOK_VERIFY_TOKEN" then . + {"value": $WHATSAPP_WEBHOOK_VERIFY_TOKEN}
+                elif .name == "GOOGLE_CLOUD_PROJECT"        then . + {"value": $GOOGLE_CLOUD_PROJECT}
+                elif .name == "GCP_SERVICE_ACCOUNT_B64"     then . + {"value": $GCP_SERVICE_ACCOUNT_B64}
+                else .
+                end
+              )
+            )
+          ' \
+          --arg DATABASE_URL                  "${{ secrets.DATABASE_URL }}" \
+          --arg DIRECT_URL                    "${{ secrets.DIRECT_URL }}" \
+          --arg ANTHROPIC_API_KEY             "${{ secrets.ANTHROPIC_API_KEY }}" \
+          --arg OPENAI_API_KEY                "${{ secrets.OPENAI_API_KEY }}" \
+          --arg WHATSAPP_WABA_ID              "${{ secrets.WHATSAPP_WABA_ID }}" \
+          --arg WHATSAPP_PHONE_NUMBER_ID      "${{ secrets.WHATSAPP_PHONE_NUMBER_ID }}" \
+          --arg WHATSAPP_PHONE_NUMBER         "${{ secrets.WHATSAPP_PHONE_NUMBER }}" \
+          --arg WHATSAPP_ACCESS_TOKEN         "${{ secrets.WHATSAPP_ACCESS_TOKEN }}" \
+          --arg WHATSAPP_WEBHOOK_VERIFY_TOKEN "${{ secrets.WHATSAPP_WEBHOOK_VERIFY_TOKEN }}" \
+          --arg GOOGLE_CLOUD_PROJECT          "${{ secrets.GOOGLE_CLOUD_PROJECT }}" \
+          --arg GCP_SERVICE_ACCOUNT_B64       "${{ secrets.GCP_SERVICE_ACCOUNT_B64 }}" \
+          task-definition.json > task-definition-final.json
+
+      # ── 7. Update image in task definition ────────────────────────────────
+      - name: Update ECS task definition with new image
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition-final.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.build-image.outputs.image }}
+
+      # ── 8. Run DB migrations ───────────────────────────────────────────────
+      # Runs prisma migrate deploy as a one-off ECS task.
+      # Polls until the task exits, then fails the workflow if it errored.
+      - name: Run database migrations
+        run: |
+          TASK_ARN=$(aws ecs run-task \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --task-definition ${{ env.ECS_TASK_DEFINITION }} \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ secrets.ECS_SUBNET_ID }}],securityGroups=[${{ secrets.ECS_SECURITY_GROUP_ID }}],assignPublicIp=ENABLED}" \
+            --overrides '{
+              "containerOverrides": [{
+                "name": "${{ env.CONTAINER_NAME }}",
+                "command": ["npx", "prisma", "migrate", "deploy"],
+                "environment": [
+                  {"name": "DATABASE_URL", "value": "${{ secrets.DATABASE_URL }}"},
+                  {"name": "DIRECT_URL",   "value": "${{ secrets.DIRECT_URL }}"}
+                ]
+              }]
+            }' \
+            --query 'tasks[0].taskArn' \
+            --output text)
+
+          echo "Migration task ARN: $TASK_ARN"
+
+          # Poll until task stops (max 5 min)
+          for i in $(seq 1 30); do
+            STATUS=$(aws ecs describe-tasks \
+              --cluster ${{ env.ECS_CLUSTER }} \
+              --tasks $TASK_ARN \
+              --query 'tasks[0].lastStatus' \
+              --output text)
+            echo "Status: $STATUS"
+            if [ "$STATUS" = "STOPPED" ]; then
+              break
+            fi
+            sleep 10
+          done
+
+          # Check exit code of the migration container
+          EXIT_CODE=$(aws ecs describe-tasks \
+            --cluster ${{ env.ECS_CLUSTER }} \
+            --tasks $TASK_ARN \
+            --query "tasks[0].containers[?name=='${{ env.CONTAINER_NAME }}'].exitCode | [0]" \
+            --output text)
+
+          echo "Migration exit code: $EXIT_CODE"
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "❌ Migration failed with exit code $EXIT_CODE"
+            exit 1
+          fi
+          echo "✅ Migrations completed successfully"
+
+      # ── 9. Deploy to ECS ───────────────────────────────────────────────────
+      - name: Deploy to ECS
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
