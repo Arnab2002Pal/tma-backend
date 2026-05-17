@@ -1,14 +1,12 @@
+// prisma.config.ts
 import { defineConfig } from 'prisma/config';
+import { config } from 'dotenv';
 
-const config = defineConfig({
+config(); // This loads the .env file
+
+export default defineConfig({
   schema: 'prisma/schema.prisma',
-  migrations: {
-    path: 'prisma/migrations',
-  },
   datasource: {
-    url: process.env['DATABASE_URL'],
+    url: process.env.DATABASE_URL,
   },
 });
-
-export default config;
-module.exports = config;
