@@ -122,6 +122,7 @@ jobs:
             --overrides '{
               "containerOverrides": [{
                 "name": "${{ env.CONTAINER_NAME }}",
+                "image": "${{ steps.build-image.outputs.image }}",
                 "environment": [
                   {"name": "DATABASE_URL", "value": "${{ secrets.DATABASE_URL }}"},
                   {"name": "DIRECT_URL",   "value": "${{ secrets.DIRECT_URL }}"}
