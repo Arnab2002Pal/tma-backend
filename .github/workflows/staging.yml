@@ -113,16 +113,36 @@ jobs:
       # Polls every 10s until task reaches STOPPED, then checks exit code.
       # Workflow fails immediately if migrations fail — deploy is aborted.
       - name: Run database migrations
+        env:
+          NEW_IMAGE: ${{ steps.build-image.outputs.image }}
         run: |
+          # Update migration task definition with the new image
+          aws ecs describe-task-definition \
+            --task-definition ${{ env.ECS_MIGRATION_TASK }} \
+            --query taskDefinition \
+            > migration-task.json
+
+          # Swap image to the newly built SHA-tagged image
+          jq --arg IMAGE "$NEW_IMAGE" \
+            '.containerDefinitions[0].image = $IMAGE' \
+            migration-task.json > migration-task-updated.json
+
+          # Register new revision with updated image
+          NEW_REVISION=$(aws ecs register-task-definition \
+            --cli-input-json file://migration-task-updated.json \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+
+          echo "Migration task definition: $NEW_REVISION"
+
           TASK_ARN=$(aws ecs run-task \
             --cluster ${{ env.ECS_CLUSTER }} \
-            --task-definition ${{ env.ECS_MIGRATION_TASK }} \
+            --task-definition $NEW_REVISION \
             --launch-type FARGATE \
             --network-configuration "awsvpcConfiguration={subnets=[${{ secrets.ECS_SUBNET_ID }}],securityGroups=[${{ secrets.ECS_SECURITY_GROUP_ID }}],assignPublicIp=ENABLED}" \
             --overrides '{
               "containerOverrides": [{
                 "name": "${{ env.CONTAINER_NAME }}",
-                "image": "${{ steps.build-image.outputs.image }}",
                 "environment": [
                   {"name": "DATABASE_URL", "value": "${{ secrets.DATABASE_URL }}"},
                   {"name": "DIRECT_URL",   "value": "${{ secrets.DIRECT_URL }}"}
@@ -134,7 +154,6 @@ jobs:
 
           echo "Migration task ARN: $TASK_ARN"
 
-          # Poll until task stops (max 10 min = 60 x 10s)
           for i in $(seq 1 60); do
             STATUS=$(aws ecs describe-tasks \
               --cluster ${{ env.ECS_CLUSTER }} \
@@ -148,7 +167,6 @@ jobs:
             sleep 10
           done
 
-          # Check exit code — None means task timed out without stopping
           EXIT_CODE=$(aws ecs describe-tasks \
             --cluster ${{ env.ECS_CLUSTER }} \
             --tasks $TASK_ARN \
