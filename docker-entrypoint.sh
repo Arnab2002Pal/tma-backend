@@ -15,5 +15,4 @@ else
     echo "[entrypoint] GCP_SERVICE_ACCOUNT_B64 not set — Google STT disabled, Whisper fallback active"
 fi
 
-# ─── Start application ────────────────────────────────────────────────────────
-exec node dist/main.js
+exec "$@"

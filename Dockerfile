@@ -49,3 +49,4 @@ USER tma
 EXPOSE 3000
 
 ENTRYPOINT ["./docker-entrypoint.sh"]
+CMD ["node", "dist/main.js"]
