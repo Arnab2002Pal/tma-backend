@@ -116,7 +116,8 @@ jobs:
             --overrides '{
               "containerOverrides": [{
                 "name": "${{ env.CONTAINER_NAME }}",
-                "command": ["npx", "prisma", "migrate", "deploy"],
+                "entryPoint": ["sh", "-c"],
+                "command": ["npx prisma migrate deploy"],
                 "environment": [
                   {"name": "DATABASE_URL", "value": "${{ secrets.DATABASE_URL }}"},
                   {"name": "DIRECT_URL",   "value": "${{ secrets.DIRECT_URL }}"}
@@ -128,8 +129,7 @@ jobs:
 
           echo "Migration task ARN: $TASK_ARN"
 
-          # Poll until task stops (max 5 min)
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
             STATUS=$(aws ecs describe-tasks \
               --cluster ${{ env.ECS_CLUSTER }} \
               --tasks $TASK_ARN \
